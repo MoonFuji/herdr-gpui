@@ -309,7 +309,7 @@ impl HerdrWindow {
             .show
             .then(|| self.endpoints.get(self.selected_endpoint))
             .flatten()
-            .map(|endpoint| crate::usage::Host::from(&endpoint.connection.target));
+            .and_then(|endpoint| crate::usage::Host::of(&endpoint.connection.target));
         self.usage.poll(
             host,
             &self.config.usage,

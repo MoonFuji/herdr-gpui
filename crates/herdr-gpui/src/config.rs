@@ -91,6 +91,7 @@ pub struct Config {
     pub terminal: FontConfig,
     pub ui: FontConfig,
     pub github: GitHubConfig,
+    pub coder: CoderConfig,
     pub features: Features,
     pub notifications: NotificationConfig,
     pub clipboard_toast: ClipboardToast,
@@ -476,6 +477,39 @@ impl GitHubConfig {
     }
 }
 
+/// A self-hosted Coder deployment whose workspaces can be added as devices.
+/// Coder's OAuth2 provider requires a confidential client, so the secret is
+/// configured here or in `HERDR_CODER_OAUTH_CLIENT_SECRET`; it is redacted from
+/// debug output and never written back by the GUI.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CoderConfig {
+    pub url: Option<String>,
+    pub oauth_client_id: Option<String>,
+    pub oauth_client_secret: Option<secrecy::SecretString>,
+    pub oauth_redirect_uri: Option<String>,
+    pub organization: Option<String>,
+    pub workspace_prefix: Option<String>,
+    /// Absolute path to the `coder` CLI when it is not on PATH.
+    pub cli: Option<PathBuf>,
+    pub allow_plaintext_credentials: bool,
+}
+
+impl CoderConfig {
+    /// The validated deployment settings, or `None` when Coder is not set up.
+    /// Each `HERDR_CODER_*` variable replaces the matching key.
+    pub(crate) fn settings(&self) -> Result<Option<crate::coder::Settings>> {
+        self.settings_with(|name| env::var_os(name))
+    }
+
+    pub(crate) fn settings_with(
+        &self,
+        var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Option<crate::coder::Settings>> {
+        Ok(crate::coder::Settings::resolve(self, var)?)
+    }
+}
+
 /// The first terminal column otherwise starts against the sidebar's divider,
 /// which crowds the prompt. Two-thirds of a default cell reads as a gutter
 /// without costing a column at any usable window width.
@@ -577,6 +611,7 @@ impl Default for Config {
         Self {
             theme: "Default".into(),
             github: GitHubConfig::default(),
+            coder: CoderConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
             usage: crate::usage::UsageConfig::default(),
@@ -611,6 +646,7 @@ struct Settings {
     terminal: FontSettings,
     ui: FontSettings,
     github: GitHubConfig,
+    coder: CoderConfig,
     features: Features,
     notifications: NotificationConfig,
     clipboard_toast: ClipboardToastSettings,
@@ -948,6 +984,10 @@ impl Config {
         let mut config = Self::default();
         settings.github.client_id_with_override(None)?;
         config.github = settings.github;
+        // Resolve without the environment so a bad file is reported at load,
+        // while a later environment override still applies when signing in.
+        settings.coder.settings_with(|_| None)?;
+        config.coder = settings.coder;
         config.features = settings.features;
         config.notifications = settings.notifications;
         config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);

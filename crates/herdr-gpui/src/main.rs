@@ -12,6 +12,7 @@ mod avatars;
 mod browser;
 mod cli;
 mod close_modal;
+mod coder;
 mod config;
 mod connection;
 mod constants;
