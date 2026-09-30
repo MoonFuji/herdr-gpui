@@ -15,12 +15,15 @@ mod limits;
 mod method;
 mod options;
 mod queue;
+mod script;
 mod session;
 mod sessions;
 mod ssh;
 mod transport;
 mod upload;
 
+#[cfg(all(test, unix))]
+mod test_executable;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
@@ -42,6 +45,7 @@ pub use event::ClientEvent;
 pub use handle::{Client, ClientHandle};
 pub use method::Method;
 pub use options::ConnectOptions;
+pub use script::{ScriptHost, ScriptLimits, run_script, shell_quote};
 pub use sessions::{
     LocalSession, RemoteSession, SessionState, delete_local_session, delete_remote_session,
     list_local_sessions, list_remote_sessions,

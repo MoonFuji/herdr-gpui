@@ -244,11 +244,15 @@ pub(super) fn status(status: AgentStatus, removing: bool, theme: &Theme, font: &
     if removing {
         removing_dot("worktree-removing", theme)
     } else {
-        status_indicator(status, font).mt_0()
+        status_indicator(status, font, theme).mt_0()
     }
 }
 
 /// Uncommitted work, marked as the titlebar marks it.
+pub(super) fn teleported(key: &str, size: f32, theme: &Theme) -> Div {
+    crate::icons::teleported(theme, size).debug_selector(|| format!("teleported-{key}"))
+}
+
 pub(super) fn dirty(key: &str, size: f32, theme: &Theme) -> Div {
     crate::icons::uncommitted(theme, size).debug_selector(|| format!("dirty-{key}"))
 }

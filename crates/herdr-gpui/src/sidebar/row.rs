@@ -142,23 +142,26 @@ pub(super) fn tree_lines(
 pub(super) struct RowBadge {
     pub(super) pr: Option<PrBadge>,
     pub(super) dirty: bool,
+    /// The work moved to another host; this checkout stays behind.
+    pub(super) teleported: bool,
 }
 
 impl RowBadge {
     /// Nothing to draw is nothing to reserve, so a row with neither keeps its
     /// full label width.
-    pub(super) fn new(pr: Option<PrBadge>, dirty: bool) -> Option<Self> {
-        (pr.is_some() || dirty).then_some(Self { pr, dirty })
+    pub(super) fn new(pr: Option<PrBadge>, dirty: bool, teleported: bool) -> Option<Self> {
+        (pr.is_some() || dirty || teleported).then_some(Self {
+            pr,
+            dirty,
+            teleported,
+        })
     }
 
     pub(super) fn width(&self, font: &FontConfig, layout: &dyn SidebarDensity) -> f32 {
         let pr = self.pr.as_ref().map_or(0., |pr| pr.width(font, layout));
         // Reserve the icon and the gap before the PR number, even at small fonts.
-        pr + if self.dirty {
-            line_height(font).min(18.) + glyph_width(font)
-        } else {
-            0.
-        }
+        let mark = line_height(font).min(18.) + glyph_width(font);
+        pr + mark * f32::from(u8::from(self.dirty) + u8::from(self.teleported))
     }
 }
 
@@ -364,7 +367,7 @@ pub(super) fn row(
     } else {
         0.
     };
-    let status_color = status_style(status).2;
+    let status_color = status_style(status, theme).2;
     let label_width = (available - pr_reserve - status_reserve).max(0.);
     let agent_icon = match kind {
         RowKind::Agent(icon) => Some(icon),
@@ -430,7 +433,7 @@ pub(super) fn row(
         .child(if removing {
             removing_dot("worktree-removing", theme).mt(px((line_height(font) - STATUS_WIDTH) / 2.))
         } else {
-            status_indicator(status, font)
+            status_indicator(status, font, theme)
         })
         .child(
             div()
@@ -522,7 +525,11 @@ pub(super) fn row(
             row.child(div().w(px(ARROW_RESERVE - gap)).flex_none())
         })
         .when_some(badge, |row, badge| {
-            let RowBadge { pr, dirty } = badge;
+            let RowBadge {
+                pr,
+                dirty,
+                teleported,
+            } = badge;
             row.child(
                 div()
                     .debug_selector(|| format!("pr-{key}"))
@@ -543,6 +550,15 @@ pub(super) fn row(
                             // Uncommitted work, marked the way the titlebar
                             // button marks it: the counts beside it are the
                             // pull request's, not the working tree's.
+                            .when(teleported, |line| {
+                                line.child(
+                                    crate::icons::teleported(
+                                        theme,
+                                        (line_height(font) * 0.75).round().min(15.),
+                                    )
+                                    .debug_selector(|| format!("teleported-{key}")),
+                                )
+                            })
                             .when(dirty, |line| {
                                 line.child(
                                     // Well under the line height, so marks on
@@ -573,7 +589,7 @@ pub(super) fn row(
                                 .child(
                                     div()
                                         .flex_none()
-                                        .text_color(rgb(theme.palette[2]))
+                                        .text_color(rgb(theme.ink(theme.palette[2])))
                                         .child(label_text(&badge.additions)),
                                 )
                                 .child(
@@ -585,7 +601,7 @@ pub(super) fn row(
                                 .child(
                                     div()
                                         .flex_none()
-                                        .text_color(rgb(theme.palette[1]))
+                                        .text_color(rgb(theme.ink(theme.palette[1])))
                                         .child(label_text(&badge.deletions)),
                                 ),
                         )

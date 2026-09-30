@@ -172,7 +172,7 @@ impl HerdrWindow {
                                 .flex_none()
                                 .rounded_full()
                                 .bg(rgb(if endpoint.live.status.is_connected() {
-                                    crate::menu::ONLINE
+                                    crate::menu::online(theme)
                                 } else {
                                     theme.muted
                                 })),
@@ -322,6 +322,7 @@ impl HerdrWindow {
                             (endpoint_index == self.selected_endpoint)
                                 .then_some(&self.menu.pr_cache),
                             &self.git,
+                            (&self.teleport_marks, &endpoint.id),
                             theme,
                         ),
                         removing: selected

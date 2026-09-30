@@ -16,6 +16,7 @@ mod coder;
 mod config;
 mod connection;
 mod constants;
+mod contrast;
 mod control;
 mod controls;
 mod daemon;
@@ -39,6 +40,7 @@ mod menus;
 mod motion;
 mod navigation;
 mod notifications;
+mod osc52;
 mod palette;
 mod pane_menu;
 mod preferences;
@@ -53,6 +55,7 @@ mod sound;
 mod state;
 mod state_file;
 mod tab_menu;
+mod teleport;
 mod terminal;
 mod terminal_painter;
 mod theme_picker;
@@ -69,6 +72,8 @@ mod worktree_banner;
 mod performance;
 #[cfg(feature = "integration-test")]
 mod smoke;
+#[cfg(all(test, unix))]
+mod test_executable;
 
 pub use error::{Error, Result};
 

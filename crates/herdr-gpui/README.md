@@ -336,6 +336,23 @@ already waiting in a connection inbox from the disabled period are discarded too
 Failed reloads preserve current settings. QA
 previews remain available regardless of delivery settings.
 
+The sidebar button at the left of the titlebar hides or shows the sidebar.
+It stays available when the sidebar is hidden; the existing View menu command and shortcut still work.
+In **Settings > Appearance**, click **Show usage** to turn the bottom quota display on or off.
+The choice is saved to `config-gpui.local.toml` and follows the existing `[usage] show` setting.
+
+The app's own colored marks and labels (status dots and words, pull request
+badges, diff counts, usage warnings, online dots, toasts) keep a minimum
+contrast against the sidebar, menus, and selected rows. Each color keeps its
+hue and moves only its lightness, and only as far as it has to, so a theme
+that already reads well is drawn as authored: on dark themes the status dots
+keep upstream's colors, while light themes such as Catppuccin Latte get darker
+versions of the same hues. **Settings > Appearance > High contrast**, or
+top-level `contrast = "high"`, raises that minimum from 3:1 (the WCAG level for
+graphics) to 4.5:1 (the level for text), lifts dim labels to it too, and makes
+selected rows stand further off the surface. Terminal output is never
+adjusted; programs keep the colors they asked for.
+
 Choose the sidebar layout from **View > Layout**, which lists every layout,
 checks the one in use, switches at once, and saves the choice to
 `config-gpui.local.toml`. The same setting can be written by hand as a
@@ -369,6 +386,7 @@ GUI shows the same status word beside each agent, in the activity dot's color,
 in every layout. An agent with its own `rows_by_agent` entry follows that entry
 instead, as the terminal client does. Rows without the token keep the dot
 alone, so an unconfigured pair of clients renders alike.
+Status dots and words follow the contrast setting described above.
 
 Three more layouts draw rows with a design of their own, each with fixed
 spacing:
@@ -413,11 +431,11 @@ mode = "compact"
 sidebar_gap = 8
 ```
 
-`sidebar_gap` (finite 0..64 logical pixels,
-default `8`) is blank space between the sidebar and the terminal beside it, so
-the first column does not sit against the divider; `0` restores the flush edge.
+`sidebar_gap` (finite 0..64 logical pixels, default `0`) is optional blank space between the sidebar and the terminal beside it.
+The default keeps the first column flush with the divider; an explicit value such as `8` adds a gutter.
 The terminal keeps the remaining width, so the daemon is resized to the columns
 it actually has, and the gap is ignored while the sidebar is hidden.
+Any space smaller than one character cell at the right or bottom edge takes the adjacent terminal cells' background colors, without stretching text or changing input coordinates.
 
 The `[clipboard_toast]` table controls the `copied to clipboard` flash shown
 after a terminal selection is copied. Like the keymap (see the daemon `[keys]`
@@ -594,6 +612,12 @@ the highlight, and shows the `copied to clipboard` flash described under
 [Configuration](#configuration). Selection is client-local: it reads the surface
 the client already has, sends nothing to the daemon, and asks it for nothing.
 
+A program that copies with OSC 52 — many editors and agent CLIs do, especially
+when they own the mouse — is honored too: the daemon forwards the bytes to this
+client, which writes them to the same system clipboard and shows the same flash.
+Only bounded UTF-8 text is written; malformed, non-text, or oversized writes are
+dropped without replacing what was already on the clipboard.
+
 A selection stays inside the pane it started in, and a drag that leaves the pane
 or the window selects up to its edge rather than into its neighbor. A selection
 inside a popup takes the popup's own cells, never the panes it covers. Because
@@ -659,6 +683,91 @@ you remove them or the remote OS cleans its temporary directory: unlike image
 bridge files, they are not owned or deleted by Herdr on disconnect. Network loss
 can prevent cleanup, and kernel-blocked local filesystem operations cannot be
 forcibly interrupted. A copy stalls out after 30 seconds without progress.
+
+## Teleport
+
+Right-click a linked worktree and choose Teleport... to move it to another
+connected host: its branch and commits, staged, unstaged and untracked changes,
+tabs and splits, the programs running in them, and agent sessions. It is offered
+on Linux and macOS clients when the worktree's host is the local session or a
+saved SSH host; custom socket endpoints are not scripted.
+
+1. **Choose a host.** Every other enabled host is listed at once, connected or
+   not; nothing is probed until one is chosen. The review then finds where the
+   worktree goes there: the checkout it once left (see below), else the
+   repository if it is open, matched by normalized Git remote (`origin` first,
+   then any remote) or, only when this repository has no remotes, by name.
+   Otherwise Teleport sets it up: a checkout of the same repository at the same
+   place under the home directory (`~/code/app`) is opened as a space; failing
+   that, the repository is cloned there from `origin` without prompting, or,
+   when that host cannot reach `origin`, copied from this machine with its
+   branches and tags and `origin` restored. A different repository already at
+   that place is left alone and the copy goes to `<place>-teleport`.
+2. **Review.** The dialog lists the branch, unpushed commits, changed and
+   untracked files, and what each pane becomes. The destination's branch must be
+   absent or an ancestor of this one, and must not be checked out there.
+3. **Teleport.** Closing the dialog does not stop a move in progress; its result
+   arrives as a flash, and success switches to the new workspace on the
+   destination, waiting for that host to connect and list it if need be.
+
+Commits travel as a Git bundle holding only what the destination lacks. The
+uncommitted work travels as two temporary commits, built through a temporary
+index so the source checkout, index and branch are not modified. The branch is
+set to the source's commit, fast-forwarding a branch already there but never
+overwriting one that diverged. The destination's `herdr worktree create` checks
+it out under the same name, then the staged index and working tree are restored exactly, binary files
+included. Ignored files such as `.env` and build output stay behind, and so do
+submodule contents.
+
+When `origin` is on GitHub and the destination cannot reach it by itself (no
+SSH key there, or an unknown host key), the review says so and the move lends
+it this machine's `gh auth token`. The token travels over the script's stdin
+and is stored in the repository's Git directory, `.git/herdr/github-token` (mode
+600), so no working tree or commit ever holds it. A repository-local credential
+helper answers `https://github.com` from that file, `git@github.com:` URLs are
+rewritten to HTTPS for that repository, and `.envrc` gains an `export GH_TOKEN`
+that reads the file, for `gh` under direnv; it is excluded locally, and a
+repository that tracks its own `.envrc` is left untouched. Replace the file to
+rotate the token. If `gh` is not signed in here, the review warns that pull
+and push will not work there.
+
+Tabs, split directions and ratios, and custom tab and workspace labels are
+rebuilt. Each pane starts in the same directory relative to the checkout.
+Running commands start again with their arguments, with paths under the
+checkout moved to the new checkout. Environment variables, shell history,
+background jobs and unsaved editor buffers do not carry over.
+
+Agent sessions move in each agent's own format, so the full history resumes:
+
+| Agent | Moved as | Resumed with |
+| --- | --- | --- |
+| Claude Code | transcript into the new cwd's `~/.claude/projects` directory | `claude --resume <id>` |
+| Codex | rollout under `~/.codex/sessions` | `codex resume <id>` |
+| opencode | `opencode export`, then `opencode import` | `opencode --session <id>` |
+| pi, omp | session file into the new cwd's session directory | `pi --session <file>` |
+
+The checkout path is rewritten inside each moved session. Model and permission
+flags from the original command line are kept. Initial prompts are dropped. An
+agent the destination lacks, or one with no reported session, is asked first to
+write a handoff note to `.herdr/teleport/handoff-N.md`. The note travels with the
+changes, even where `.herdr` is ignored. The same agent, or else the first
+installed of Claude Code, Codex, opencode and pi, then starts with that note.
+Anything nothing can continue is listed as skipped.
+
+Once the destination worktree, changes and tabs exist, the source workspace's
+programs stop: its tabs are replaced by one idle `teleported` shell tab, and the
+workspace and checkout stay. Herdr has no moved or disabled state, so this
+client remembers the move (`teleported.json` in its state directory) and marks
+the row with a teleport icon. Its menu offers Go to teleported copy and Clear
+teleported mark instead of Teleport. The copy on the destination offers
+Teleport back, which opens Teleport already aimed at the host the work came
+from. Teleporting the work back picks that checkout as the destination: its current state, committed or not, is saved to
+`refs/herdr-teleport/backup/...` first, then it takes the returning branch and
+changes, its tabs are rebuilt, and the mark is cleared.
+Everything runs as noninteractive scripts calling Git and the `herdr` CLI on
+each host. Remote hosts use the terminal's SSH trust and authentication policy,
+and the UI thread never blocks. The GUI connection's API does not expose layouts,
+process details or agent sessions, which is why Teleport uses the CLI.
 
 ## Images
 

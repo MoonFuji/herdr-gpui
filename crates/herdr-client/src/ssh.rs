@@ -33,9 +33,7 @@ impl Drop for SshChild {
 pub(crate) enum SshChild {}
 
 #[cfg(unix)]
-pub(super) fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
+pub(super) use crate::script::shell_quote as quote;
 
 // PATH first, excluding mise shims, followed by upstream's known install roots.
 // Keep paths in shell variables: discovered executable names are never eval'd.
@@ -572,13 +570,11 @@ mod tests {
 
     #[test]
     fn discovery_and_bridge_stdio_work_with_quoted_install_paths() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root =
             std::env::temp_dir().join(format!("herdr-client-{}-quoted ' path", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let binary = root.join("herdr");
-        std::fs::write(&binary, r#"#!/bin/sh
+        crate::test_executable::write(&binary, r#"#!/bin/sh
 if [ "$1" = status ]; then
     printf '%s\n' '{"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"],"remote_bridge_idle_timeout":true}'
     exit 0
@@ -586,8 +582,7 @@ fi
 [ "$1" = --session ] && [ "$2" = agents ] && [ "$3" = remote-client-bridge ] && [ "$4" = --idle-timeout-v1 ] || exit 1
 IFS= read -r hello || exit 1
 printf '%s\n' "$hello"
-"#).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#, 0o700).unwrap();
         let (mut stream, child_stream) = Stream::pair().unwrap();
         stream.set_read_timeout(Some(POLL)).unwrap();
         let child = SshChild(
@@ -651,19 +646,16 @@ printf '%s\n' "$hello"
 
     #[test]
     fn probe_script_reports_the_session_server_without_starting_it() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = std::env::temp_dir().join(format!("herdr-probe-{}-a ' b", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let binary = root.join("herdr");
-        std::fs::write(&binary, r#"#!/bin/sh
+        crate::test_executable::write(&binary, r#"#!/bin/sh
 case "$*" in
     "status client --json") printf '%s\n' '{"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"]}';;
     "--session work's status server --json") [ -e "$HOME/up" ] && printf '%s\n' '{"running":true}' || printf '%s\n' '{"running":false}';;
     *) exit 1;;
 esac
-"#).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#, 0o700).unwrap();
         let run = || {
             let output = Command::new("/bin/sh")
                 .args(["-c", &probe_command("work's")])
