@@ -271,7 +271,7 @@ Reload waits while a theme preview/save is active. The manual GUI config reload
 action remains available; daemon config reload is separate.
 
 Settings opens a separate, reusable native window with **Appearance, Fonts,
-Indicators, Sound, Notifications, Integrations, and General** in a sidebar.
+Indicators, Sound, Notifications, Integrations, Plugins, and General** in a sidebar.
 The terminal stays usable while Settings is open. Cmd-W (or Ctrl-W) closes only
 Settings; reopening activates the existing window instead of creating a duplicate.
 Local preferences remain editable if the originating session window closes.
@@ -377,6 +377,16 @@ by an explicit button click, modifies agent hook/plugin configuration on that
 host, and refreshes the list afterward. No uninstall action is offered because
 the upstream binary endpoint does not advertise it. Native GitHub sign-in remains
 separate from agent integrations.
+
+**Plugins** lists, for every enabled host, the plugin actions that host binds
+with a `[[keys.command]]` entry of `type = "plugin_action"`, taken from the
+snapshot's command manifest. Its search field filters action names and key
+labels. **Run** sends `command.invoke` on the selected host's focused workspace,
+tab, and pane, as the command palette does; another host's actions run after
+selecting that host. Herdr's binary endpoint offers no `plugin.*` method, so the
+GUI cannot list installed plugins or their versions, enable or disable them,
+read plugin logs, or run actions without a key binding. Use `herdr plugin` on
+the host for those. Nothing is installed from Settings.
 
 The terminal face can also be resized for the current session from the View menu,
 the in-app menu, the command palette, or `cmd-=` / `cmd--` / `cmd-0`. Adjustments
@@ -1203,7 +1213,8 @@ Windows setup) nothing is saved and the window says so.
   reads nor downloads block rendering; sign-out discards profile refresh results.
 - In-app sidebar menu for settings, keybinds, config reload, update information,
   and detach/reconnect. The standalone Settings window combines shared Herdr settings,
-  daemon agent integrations, editable native fonts, and general configuration.
+  daemon agent integrations, bound plugin actions, editable native fonts, and
+  general configuration.
   A searchable installed-font picker can set all four families
   together or each independently (including Platform default), while sizes have
   −/+ controls and editable whole-number fields (8–48; Enter or leave to save,
