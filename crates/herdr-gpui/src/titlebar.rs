@@ -1,4 +1,6 @@
 //! Native chrome and GitHub account access.
+mod status;
+
 use crate::{HerdrWindow, fonts::StyledFont, menu::Page};
 use gpui::{prelude::*, *};
 
@@ -219,26 +221,19 @@ impl HerdrWindow {
                         cx.stop_propagation();
                         this.command(crate::controls::Command::ToggleSidebar, window, cx);
                     }))
-                    .child(
-                        div()
-                            .w(px(18.))
-                            .h(px(14.))
-                            .border_1()
-                            .border_color(rgb(self.theme.foreground))
-                            .rounded(px(2.))
-                            .child(
-                                div()
-                                    .w(px(5.))
-                                    .h_full()
-                                    .border_r_1()
-                                    .border_color(rgb(self.theme.foreground))
-                                    .when(self.sidebar_visible, |bar| {
-                                        bar.bg(rgb(self.theme.foreground))
-                                    }),
-                            ),
-                    )
+                    .child(sidebar_glyph(self.sidebar_visible, &self.theme))
                     .into_any_element(),
             ),
+        )
+        .child(
+            div()
+                .debug_selector(|| "titlebar-center".into())
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .when(self.config.usage.topbar, |center| {
+                    center.child(status::render(&self.live, &self.config.ui, &self.theme))
+                }),
         )
         .children(self.render_git_button(cx))
         .child(
@@ -320,13 +315,6 @@ pub(super) fn render(surface: u32, leading: Option<AnyElement>) -> Stateful<Div>
         .bg(rgb(surface).blend(rgba(0xffffff1a)))
         .child(div().flex_none().w(px(80.)).h_full())
         .children(leading)
-        .child(
-            div()
-                .debug_selector(|| "titlebar-center".into())
-                .flex_1()
-                .min_w_0()
-                .h_full(),
-        )
         .on_click(|event, window, _| {
             if event.click_count() == 2 {
                 window.titlebar_double_click();
@@ -340,6 +328,25 @@ pub(super) fn options(title: &str) -> TitlebarOptions {
         appears_transparent: cfg!(target_os = "macos"),
         traffic_light_position: cfg!(target_os = "macos").then(|| point(px(9.), px(9.))),
     }
+}
+
+/// A window with its sidebar panel, filled while the sidebar is expanded.
+pub(crate) fn sidebar_glyph(expanded: bool, theme: &crate::config::Theme) -> Div {
+    div()
+        .w(px(18.))
+        .h(px(14.))
+        .flex_none()
+        .border_1()
+        .border_color(rgb(theme.foreground))
+        .rounded(px(2.))
+        .child(
+            div()
+                .w(px(5.))
+                .h_full()
+                .border_r_1()
+                .border_color(rgb(theme.foreground))
+                .when(expanded, |bar| bar.bg(rgb(theme.foreground))),
+        )
 }
 
 #[cfg(test)]

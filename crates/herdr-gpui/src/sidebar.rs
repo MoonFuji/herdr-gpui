@@ -7,10 +7,13 @@ mod hover;
 mod layout;
 mod layouts;
 mod metrics;
+mod order;
 pub(crate) mod preview;
+mod rail;
 mod render;
 mod reorder;
 mod row;
+mod tokens;
 mod view;
 mod workspaces;
 
@@ -24,14 +27,17 @@ pub(crate) mod layout_tests;
 pub(crate) mod native_tests;
 
 pub(crate) use {
-    agents::{Indicators, agent_name, status_indicator},
+    agents::{Indicators, agent_name, state_label, status_indicator},
     hover::{HoverMenu, HoverRest},
     metrics::{ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, ICON_RESERVE, LABEL_GAP, STATUS_WIDTH},
+    rail::SidebarMode,
     reorder::WorkspaceDrag,
     row::{compact, github_mark, label_text},
     view::SidebarView,
     workspaces::workspace_label,
 };
+
+pub(crate) use order::step as sidebar_step;
 
 #[cfg(any(test, feature = "integration-test"))]
 pub(crate) use metrics::LABEL_WIDTH;

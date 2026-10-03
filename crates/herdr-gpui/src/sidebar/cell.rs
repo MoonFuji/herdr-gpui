@@ -13,7 +13,7 @@
 
 use super::{
     layout::SidebarLook,
-    row::{RowBadge, RowIcon, RowLift, RowTree},
+    row::{RowBadge, RowIcon, RowLift, RowTree, Upstream},
 };
 use crate::{
     config::{FontConfig, LayoutMode, Theme},
@@ -21,6 +21,7 @@ use crate::{
 };
 use gpui::{App, ClickEvent, Div, ElementId, Window};
 use herdr_client::protocol::{AgentStatus, ClientShellWorkspace};
+use std::borrow::Cow;
 
 /// Read-only inputs every row of one render shares.
 pub(super) struct RowContext<'a> {
@@ -62,6 +63,10 @@ pub(super) struct WorkspaceRow<'a> {
     pub(super) badge: Option<RowBadge>,
     /// The checkout is being deleted.
     pub(super) removing: bool,
+    /// Status the row shows. A collapsed group's head takes its most urgent member.
+    pub(super) status: AgentStatus,
+    /// Daemon token rows, painted in the layout's own frame. Empty keeps its native lines.
+    pub(super) lines: Vec<Vec<super::tokens::ResolvedToken>>,
 }
 
 impl<'a> WorkspaceRow<'a> {
@@ -74,8 +79,13 @@ impl<'a> WorkspaceRow<'a> {
             .filter(|branch| !branch.is_empty())
     }
 
+    /// Commits to push and pull against the branch's upstream, if any.
+    pub(super) fn upstream(&self) -> Option<Upstream> {
+        Upstream::new(self.workspace.git_ahead_behind)
+    }
+
     pub(super) fn status(&self) -> AgentStatus {
-        self.workspace.agent_status
+        self.status
     }
 }
 
@@ -89,8 +99,11 @@ pub(super) struct AgentRow<'a> {
     /// workspace has gone.
     pub(super) place: Option<(&'a str, Option<&'a str>)>,
     /// The daemon's `state_text` word when its sidebar config asks for it, so
-    /// the GUI and the TUI name the status the same way.
-    pub(super) status_text: Option<&'static str>,
+    /// the GUI and the TUI name the status the same way: the agent's own
+    /// state label when its integration set one.
+    pub(super) status_text: Option<Cow<'a, str>>,
+    /// Daemon token rows, painted in the layout's own frame. Empty keeps its native lines.
+    pub(super) lines: Vec<Vec<super::tokens::ResolvedToken>>,
 }
 
 /// What a row shows.

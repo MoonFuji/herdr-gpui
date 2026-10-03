@@ -27,7 +27,7 @@ enum Action {
 struct Entry {
     label: String,
     detail: String,
-    badge: &'static str,
+    badge: SharedString,
     action: Action,
     /// Index of the row this one nests under, indented only while that row
     /// is visible so a search never leaves it hanging beneath nothing.
@@ -187,7 +187,7 @@ fn go_to_entries(
         entries.push(Entry {
             label: workspace.label.clone(),
             detail,
-            badge: "",
+            badge: SharedString::default(),
             action: go(NavigationTarget::Workspace(workspace.workspace_id.clone())),
             parent: None,
         });
@@ -234,7 +234,11 @@ fn go_to_entries(
             entries.push(Entry {
                 label: name.to_owned(),
                 detail,
-                badge: agent.map_or("", |agent| status_badge(agent.agent_status)),
+                badge: agent.map_or_else(SharedString::default, |agent| {
+                    crate::sidebar::state_label(agent, status_badge(agent.agent_status))
+                        .into_owned()
+                        .into()
+                }),
                 action: go(NavigationTarget::Pane(pane.pane_id.clone())),
                 parent: Some(parent),
             });
@@ -316,13 +320,15 @@ impl HerdrWindow {
                 COMMANDS
                     .iter()
                     .filter(|info| info.command != Command::Palette)
-                    .filter(|info| {
-                        info.command != Command::ClearPane || self.live.supports_pane_clear
+                    .filter(|info| match info.command {
+                        Command::ClearPane => self.live.supports_pane_clear,
+                        Command::EditScrollback => self.live.supports_edit_scrollback,
+                        _ => true,
                     })
                     .map(|info| Entry {
                         label: info.label.into(),
-                        detail: self.config.keybindings.primary(info.command).into(),
-                        badge: "",
+                        detail: self.keymap().primary(info.command).into(),
+                        badge: SharedString::default(),
                         action: Action::Native(info.command),
                         parent: None,
                     }),
@@ -352,13 +358,7 @@ impl HerdrWindow {
         let target = self.live.snapshot.as_ref().map(|snapshot| {
             if !workspaces_only {
                 entries.extend(snapshot.commands.iter().map(|command| {
-                    let mut bindings = command.binding_labels.clone();
-                    if !command.binding_label.is_empty()
-                        && !bindings.contains(&command.binding_label)
-                    {
-                        bindings.push(command.binding_label.clone());
-                    }
-                    bindings.retain(|binding| !binding.is_empty());
+                    let bindings = self.keymap().custom_labels(command);
                     Entry {
                         label: command
                             .description
@@ -366,15 +366,8 @@ impl HerdrWindow {
                             .filter(|s| !s.trim().is_empty())
                             .unwrap_or(&command.command_id)
                             .clone(),
-                        detail: if bindings.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                "Daemon bindings: {} (not GUI shortcuts)",
-                                bindings.join(", ")
-                            )
-                        },
-                        badge: "Herdr command",
+                        detail: bindings.join(", "),
+                        badge: "Herdr command".into(),
                         action: Action::Configured(command.command_id.clone(), command.action),
                         parent: None,
                     }
@@ -479,6 +472,39 @@ impl HerdrWindow {
         }
     }
 
+    /// Runs a daemon custom command on the focused workspace, tab, and pane,
+    /// as choosing it in the palette does; a shortcut has no palette to
+    /// report a refusal in, so it reads as a local error instead.
+    pub(crate) fn invoke_custom_command(
+        &mut self,
+        id: &str,
+        action: ClientShellCommandAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.activation_deadline.is_some()
+            || !self.endpoints[self.selected_endpoint].surface_requested()
+        {
+            return;
+        }
+        let result = (|| {
+            if !self.input_ready() {
+                return Err(Error::PaletteConnectionNotReady);
+            }
+            let snapshot = self.live.snapshot.as_ref().ok_or(Error::NoSnapshot)?;
+            Target::capture(snapshot).invocation(snapshot, id, action)
+        })();
+        match result {
+            Ok(params) => {
+                self.request_focus_change(Method::CommandInvoke.as_str(), None, |handle, boot| {
+                    handle.request(boot, Method::CommandInvoke, params)
+                });
+                self.marked.clear();
+            }
+            Err(error) => self.local_error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
     /// Checks a Go To destination against its host's current snapshot, and
     /// reports whether that host is the selected one. Another host is selected
     /// by the navigation itself, which waits for its surface when needed.
@@ -516,6 +542,17 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Herdr's navigate-mode keys move a Go To list as its arrows do.
+        let step = match event.keystroke.key.as_str() {
+            "up" => Some(true),
+            "down" => Some(false),
+            _ => self
+                .menu
+                .palette
+                .as_ref()
+                .filter(|palette| palette.workspaces_only)
+                .and_then(|_| self.keymap().navigates_workspace(&event.keystroke)),
+        };
         let Some(palette) = &mut self.menu.palette else {
             return;
         };
@@ -528,17 +565,12 @@ impl HerdrWindow {
                 window.prevent_default();
                 self.dismiss_menu(window, cx);
             }
-            "up" | "down" if !palette.filtered.is_empty() => {
+            _ if !palette.filtered.is_empty() && step.is_some() => {
+                let up = step == Some(true);
                 cx.stop_propagation();
                 window.prevent_default();
                 let count = palette.filtered.len();
-                palette.selected = (palette.selected
-                    + if event.keystroke.key == "up" {
-                        count - 1
-                    } else {
-                        1
-                    })
-                    % count;
+                palette.selected = (palette.selected + if up { count - 1 } else { 1 }) % count;
                 palette
                     .scroll
                     .scroll_to_item(palette.selected, ScrollStrategy::Center);
@@ -989,7 +1021,7 @@ mod tests {
                 (
                     entry.label.as_str(),
                     entry.detail.as_str(),
-                    entry.badge,
+                    entry.badge.as_ref(),
                     target.clone(),
                 )
             })
@@ -1003,10 +1035,11 @@ mod tests {
                     "",
                     NavigationTarget::Workspace("w1".into())
                 ),
+                // The fixture's agent labels its blocked state "waiting".
                 (
                     "Claude",
                     "main  /repo",
-                    "blocked",
+                    "waiting",
                     NavigationTarget::Pane("w1:p1".into())
                 ),
                 (
@@ -1018,6 +1051,34 @@ mod tests {
                 ("empty", "#2", "", NavigationTarget::Workspace("w2".into())),
             ]
         );
+    }
+
+    /// An integration's state label names the agent's status in Go To, as in
+    /// the sidebar; a label for another status leaves the daemon's word.
+    #[test]
+    fn go_to_badges_use_the_agents_state_labels() {
+        let badge =
+            |labels: &[(&str, &str)]| {
+                let mut snapshot = go_to_fixture();
+                snapshot.agents[0].state_labels = labels
+                    .iter()
+                    .map(|(state, label)| ((*state).into(), (*label).into()))
+                    .collect();
+                let mut entries = Vec::new();
+                go_to_entries(crate::endpoint::LOCAL, None, &snapshot, &mut entries);
+                entries
+                .iter()
+                .find(|entry| matches!(
+                    &entry.action,
+                    Action::Go { target: NavigationTarget::Pane(pane), .. } if pane == "w1:p1"
+                ))
+                .map(|entry| entry.badge.to_string())
+            };
+        assert_eq!(
+            badge(&[("blocked", "needs you"), ("working", "busy")]).as_deref(),
+            Some("needs you")
+        );
+        assert_eq!(badge(&[("working", "busy")]).as_deref(), Some("blocked"));
     }
 
     #[test]

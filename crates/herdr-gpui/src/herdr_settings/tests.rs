@@ -62,6 +62,13 @@ fn defaults_and_path_precedence_without_environment_mutation() -> anyhow::Result
     assert_eq!(settings.toast_position, ToastPosition::BottomRight);
     assert!(settings.clipboard.enabled);
     assert_eq!(settings.clipboard.position, ClipboardPosition::BottomCenter);
+    assert_eq!(
+        settings.name_prompts,
+        NamePrompts {
+            tab: true,
+            workspace: false
+        }
+    );
     let temp = tempfile::tempdir()?;
     let missing = temp.path().join("missing/config.toml");
     assert_eq!(
@@ -111,21 +118,118 @@ position = "top-center"
 }
 
 #[test]
-fn strict_known_fields_and_typed_sources() -> anyhow::Result<()> {
+fn sidebar_collapse_defaults_compact_expanded_and_parses_upstream_values() -> anyhow::Result<()> {
+    let defaults = parsed("")?;
+    assert_eq!(
+        defaults.sidebar_collapsed_mode,
+        SidebarCollapsedMode::Compact
+    );
+    assert!(!defaults.sidebar_start_collapsed);
+    let set = parsed("[ui]\nsidebar_collapsed_mode = 'hidden'\nsidebar_start_collapsed = true\n")?;
+    assert_eq!(set.sidebar_collapsed_mode, SidebarCollapsedMode::Hidden);
+    assert!(set.sidebar_start_collapsed);
+    assert_eq!(
+        parsed("[ui]\nsidebar_collapsed_mode = 'compact'")?.sidebar_collapsed_mode,
+        SidebarCollapsedMode::Compact
+    );
+    // A mode from a newer Herdr falls back alone; its neighbour still applies.
+    let newer = parsed("[ui]\nsidebar_collapsed_mode = 'rail'\nsidebar_start_collapsed = true\n")?;
+    assert_eq!(newer.sidebar_collapsed_mode, SidebarCollapsedMode::Compact);
+    assert!(newer.sidebar_start_collapsed);
+    Ok(())
+}
+
+#[test]
+fn name_prompts_follow_both_ui_keys() -> anyhow::Result<()> {
+    let flipped = parsed("[ui]\nprompt_new_tab_name = false\nprompt_new_workspace_name = true")?;
+    assert_eq!(
+        flipped.name_prompts,
+        NamePrompts {
+            tab: false,
+            workspace: true
+        }
+    );
+    // Each key keeps its own default when only the other is set.
+    assert_eq!(
+        parsed("[ui]\nprompt_new_workspace_name = true")?.name_prompts,
+        NamePrompts {
+            tab: true,
+            workspace: true
+        }
+    );
+    // A value this build cannot read keeps Herdr's default.
+    assert_eq!(
+        parsed("[ui]\nprompt_new_tab_name = 'no'")?.name_prompts,
+        NamePrompts::default()
+    );
+    Ok(())
+}
+
+#[test]
+fn values_from_a_newer_herdr_fall_back_one_by_one() -> anyhow::Result<()> {
+    // Each value this build cannot read keeps its own default.
     for text in [
-        "[ui]\nstatus_indicators = 'bad'",
+        "[ui]\nstatus_indicators = 'bars'",
         "[ui.sound]\nenabled = 'true'",
         "[theme]\nauto_switch = 1",
         "[theme.custom]\nred = 123",
+        "[theme.custom]\naccent = 123",
         "[ui.toast]\ndelay_seconds = -1",
+        "[ui.toast]\ndelay_seconds = 3601",
+        "[ui.toast]\ndelivery = 'pager'",
         "[ui.toast.herdr]\nposition = 'top-center'",
+        "[ui]\nsidebar_collapsed_mode = 'rail'",
+        "[ui]\nsidebar_start_collapsed = 'yes'",
+        "[ui.toast.clipboard]\nposition = 'middle'\nenabled = 2",
+        "theme = 'catppuccin'",
+        "ui = 1",
     ] {
-        assert!(matches!(parsed(text), Err(Error::Parse(_))), "{text}");
+        let settings = parsed(text)?;
+        let defaults = parsed("")?;
+        assert_eq!(settings.indicators, defaults.indicators, "{text}");
+        assert_eq!(settings.sound_enabled, defaults.sound_enabled, "{text}");
+        assert_eq!(settings.toast_delivery, defaults.toast_delivery, "{text}");
+        assert_eq!(settings.toast_delay_seconds, 1, "{text}");
+        assert_eq!(settings.toast_position, defaults.toast_position, "{text}");
+        assert_eq!(
+            settings.clipboard.enabled, defaults.clipboard.enabled,
+            "{text}"
+        );
+        assert_eq!(
+            settings.clipboard.position, defaults.clipboard.position,
+            "{text}"
+        );
+        assert_eq!(settings.theme_name, defaults.theme_name, "{text}");
+        assert_eq!(settings.palettes, defaults.palettes, "{text}");
+        assert_eq!(
+            settings.sidebar_collapsed_mode, defaults.sidebar_collapsed_mode,
+            "{text}"
+        );
+        assert_eq!(
+            settings.sidebar_start_collapsed, defaults.sidebar_start_collapsed,
+            "{text}"
+        );
     }
-    assert!(matches!(
-        parsed("[ui.toast]\ndelay_seconds = 3601"),
-        Err(Error::ToastDelay)
-    ));
+    // Readable neighbours of an unreadable value still apply.
+    let settings = parsed(
+        "[theme]\nname = 'nord'\nauto_switch = 'sometimes'\n\
+         [ui]\nstatus_indicators = 'symbols'\nfuture = 1\n\
+         [ui.toast]\nenabled = true\ndelivery = 'pager'\ndelay_seconds = 9\n\
+         [ui.toast.herdr]\nposition = 'top-left'\n\
+         [ui.toast.clipboard]\nenabled = false\nposition = 'middle'",
+    )?;
+    assert_eq!(settings.theme_name, "nord");
+    assert_eq!(settings.indicators, IndicatorStyle::Symbols);
+    assert_eq!(settings.toast_delivery, ToastDelivery::Herdr);
+    assert_eq!(settings.toast_delay_seconds, 9);
+    assert_eq!(settings.toast_position, ToastPosition::TopLeft);
+    assert!(!settings.clipboard.enabled);
+    assert_eq!(settings.clipboard.position, ClipboardPosition::BottomCenter);
+    Ok(())
+}
+
+#[test]
+fn malformed_toml_keeps_typed_sources() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("config.toml");
     fs::write(&path, "[broken")?;
@@ -152,6 +256,51 @@ fn shared_sound_reader_only_validates_the_enabled_switch() -> anyhow::Result<()>
         assert!(parsed(text)?.sound_enabled);
     }
     assert!(!parsed("[ui.sound]\nenabled = false\nagents = 'backend-owned'")?.sound_enabled);
+    Ok(())
+}
+
+#[test]
+fn tab_bar_and_copy_on_select_follow_herdr_defaults_and_values() -> anyhow::Result<()> {
+    let defaults = parsed("")?;
+    assert!(defaults.copy_on_select);
+    assert_eq!(defaults.tab_bar_position, TabBarPosition::Top);
+    assert!(!defaults.hide_tab_bar_when_single_tab);
+    let set = parsed(
+        "[ui]\ncopy_on_select = false\ntab_bar_position = 'bottom'\nhide_tab_bar_when_single_tab = true",
+    )?;
+    assert!(!set.copy_on_select);
+    assert_eq!(set.tab_bar_position, TabBarPosition::Bottom);
+    assert!(set.hide_tab_bar_when_single_tab);
+    // Like Herdr, a value this build does not know keeps the default.
+    let unknown = parsed(
+        "[ui]\ncopy_on_select = 'sometimes'\ntab_bar_position = 'left'\nhide_tab_bar_when_single_tab = 1",
+    )?;
+    assert!(unknown.copy_on_select);
+    assert_eq!(unknown.tab_bar_position, TabBarPosition::Top);
+    assert!(!unknown.hide_tab_bar_when_single_tab);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn tab_bar_and_copy_on_select_edits_keep_comments() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("config.toml");
+    let original = "[ui]\ncopy_on_select = true # copy\nfuture = 1\n";
+    fs::write(&path, original)?;
+    let settings = Settings::load_path(path.clone())?
+        .save(Edit::CopyOnSelect(false))?
+        .save(Edit::TabBarPosition(TabBarPosition::Bottom))?
+        .save(Edit::HideSingleTabBar(true))?;
+    assert!(!settings.copy_on_select);
+    assert_eq!(settings.tab_bar_position, TabBarPosition::Bottom);
+    assert!(settings.hide_tab_bar_when_single_tab);
+    assert_eq!(
+        fs::read_to_string(&path)?,
+        "[ui]\ncopy_on_select = false # copy\nfuture = 1\ntab_bar_position = \"bottom\"\nhide_tab_bar_when_single_tab = true\n"
+    );
+    let settings = settings.save(Edit::TabBarPosition(TabBarPosition::Top))?;
+    assert_eq!(settings.tab_bar_position, TabBarPosition::Top);
     Ok(())
 }
 
@@ -349,7 +498,12 @@ fn every_palette_status_overrides_and_auto_switch() -> anyhow::Result<()> {
     )?;
     assert_eq!(settings.theme(false)?.surface, 0x282828);
     assert_eq!(settings.theme(true)?.surface, 0xeff1f5);
-    assert_eq!(settings.theme(true)?.background, 0xfefefe);
+    // `sidebar_bg` colors the sidebar alone, as in Herdr, never the window.
+    assert_eq!(settings.theme(true)?.background, 0xe6e9ef);
+    assert_eq!(settings.theme(true)?.sidebar, Some(0xfefefe));
+    assert_eq!(settings.theme(true)?.sidebar_background(), 0xfefefe);
+    assert_eq!(settings.theme(false)?.sidebar, None);
+    assert_eq!(settings.theme(false)?.sidebar_background(), 0x282828);
     assert_eq!(settings.theme(false)?.palette[5], 0x010203);
     assert_eq!(settings.status_color(AgentStatus::Blocked, false), 0x112233);
     assert_eq!(settings.status_color(AgentStatus::Blocked, true), 0xabcdef);
@@ -583,5 +737,39 @@ fn lock_symlinks_and_nonregular_configs_are_rejected() -> anyhow::Result<()> {
     assert!(!path.exists());
     fs::create_dir(&path)?;
     assert!(matches!(persistence::read(&path), Err(Error::UnsafePath)));
+    Ok(())
+}
+
+/// Herdr paints `sidebar_bg` on the sidebar and nowhere else, whether set for
+/// both modes or per mode; built-in themes leave it unset.
+#[test]
+fn sidebar_background_colors_only_the_sidebar() -> anyhow::Result<()> {
+    let plain = parsed("[theme]\nname = 'catppuccin'")?.theme(false)?;
+    assert_eq!(plain.sidebar, None);
+    assert_eq!(plain.sidebar_background(), plain.surface);
+    for light in [false, true] {
+        let base = parsed("[theme]\nname = 'catppuccin'\nauto_switch = true")?.theme(light)?;
+        let common = parsed(
+            "[theme]\nname = 'catppuccin'\nauto_switch = true\n[theme.custom]\nsidebar_bg = '#0d0e0f'",
+        )?
+        .theme(light)?;
+        assert_eq!(common.sidebar, Some(0x0d0e0f), "light {light}");
+        assert_eq!(
+            crate::config::Theme {
+                sidebar: None,
+                ..common
+            },
+            base,
+            "light {light}: nothing but the sidebar changes"
+        );
+        let per_mode = parsed(
+            "[theme]\nname = 'catppuccin'\nauto_switch = true\n[theme.custom]\nsidebar_bg = '#0d0e0f'\n[theme.custom.light]\nsidebar_bg = '#f0f1f2'\n[theme.custom.dark]\nsidebar_bg = '#101112'",
+        )?
+        .theme(light)?;
+        assert_eq!(
+            per_mode.sidebar,
+            Some(if light { 0xf0f1f2 } else { 0x101112 })
+        );
+    }
     Ok(())
 }

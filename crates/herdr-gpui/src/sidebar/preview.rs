@@ -182,6 +182,8 @@ impl Preview {
                             teleported: false,
                         }),
                         removing: false,
+                        status: workspace.agent_status,
+                        lines: Vec::new(),
                     }),
                     &context,
                 )
@@ -209,6 +211,7 @@ impl Preview {
                         status,
                         place: Some((&self.workspaces[index % 3].label, None)),
                         status_text: None,
+                        lines: Vec::new(),
                     }),
                     &context,
                 )
@@ -229,7 +232,7 @@ impl Preview {
             .flex_col()
             .border_r_1()
             .border_color(rgb(theme.active))
-            .bg(rgb(theme.surface))
+            .bg(rgb(theme.sidebar_background()))
             .text_color(rgb(theme.foreground))
             .text_font(font)
             .text_size(px(font.size))

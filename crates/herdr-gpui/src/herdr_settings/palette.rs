@@ -30,10 +30,15 @@ pub(super) fn canonical(name: &str) -> Option<&'static str> {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub(super) struct ThemeConfig {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     pub name: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     auto_switch: bool,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     dark_name: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     light_name: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     custom: Custom,
 }
 
@@ -42,7 +47,9 @@ pub(super) struct ThemeConfig {
 struct Custom {
     #[serde(flatten)]
     common: Overrides,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     light: Overrides,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     dark: Overrides,
 }
 
@@ -52,7 +59,12 @@ macro_rules! overrides {
     ($($name:ident = $index:literal),+ $(,)?) => {
         #[derive(Clone, Debug, Default, Deserialize)]
         #[serde(default)]
-        struct Overrides { $( $name: Option<String>, )+ }
+        struct Overrides {
+            $(
+                #[serde(deserialize_with = "crate::lenient::or_default")]
+                $name: Option<String>,
+            )+
+        }
         impl Overrides {
             fn apply(&self, colors: &mut Palette) {
                 $(if let Some(value) = &self.$name { colors.0[$index] = parse_color(value); })+
@@ -223,8 +235,9 @@ impl Palette {
     pub(super) fn theme(&self) -> crate::config::Theme {
         let mut theme = crate::config::Theme::default();
         // GPUI has no host-terminal "Reset" color. Resolve reset backgrounds to
-        // its opaque default; an unset sidebar follows the selected dim surface.
-        theme.background = self.rgb(18, self.rgb(6, theme.background));
+        // its opaque default. Herdr paints `sidebar_bg` on the sidebar alone.
+        theme.background = self.rgb(6, theme.background);
+        theme.sidebar = (self.0[18] != RESET).then_some(self.0[18]);
         theme.surface = self.rgb(1, theme.background);
         theme.active = self.rgb(2, theme.background);
         theme.muted = self.rgb(7, theme.muted);

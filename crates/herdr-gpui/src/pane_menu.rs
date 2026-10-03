@@ -56,6 +56,43 @@ mod tests {
                 json!({"pane_id":"inactive", "mode":"toggle"})
             )
         );
+        // The focused pane takes the menu's pane's place.
+        assert_eq!(
+            Action::Swap.request(&target).unwrap(),
+            (
+                Method::PaneSwap,
+                json!({"source_pane_id": original.focused_pane_id, "target_pane_id":"inactive"})
+            )
+        );
+        let focused =
+            Target::capture(&original, original.focused_pane_id.as_deref().unwrap()).unwrap();
+        assert!(focused.focused.is_none());
+        assert!(Action::Swap.request(&focused).is_none());
+        assert_eq!(
+            Action::RightClick.request(&target).unwrap(),
+            (
+                Method::PaneInputSet,
+                json!({"pane_id":"inactive", "right_click":"pane"})
+            )
+        );
+        assert_eq!(
+            Action::RightClick.label("Send Right-Clicks to Pane", &target),
+            "Send Right-Clicks to Pane"
+        );
+        let mut routed = original.clone();
+        routed.panes[1].right_click_passthrough = true;
+        let routed = Target::capture(&routed, "inactive").unwrap();
+        assert_eq!(
+            Action::RightClick.request(&routed).unwrap(),
+            (
+                Method::PaneInputSet,
+                json!({"pane_id":"inactive", "right_click":"herdr"})
+            )
+        );
+        assert_eq!(
+            Action::RightClick.label("Send Right-Clicks to Pane", &routed),
+            "Open This Menu on Right-Click"
+        );
         for case in 0..7 {
             let mut snapshot = original.clone();
             match case {
@@ -99,10 +136,13 @@ mod tests {
             "pane-menu-2",
             "pane-menu-3",
             "pane-menu-4",
+            "pane-menu-5",
+            "pane-menu-6",
+            "pane-menu-7",
         ] {
             assert!(cx.debug_bounds(selector).is_some());
         }
-        assert!(cx.debug_bounds("pane-menu-5").is_none());
+        assert!(cx.debug_bounds("pane-menu-8").is_none());
         cx.simulate_keystrokes("enter cmd-t cmd-w cmd-b");
         view.read_with(cx, |v, _| {
             assert_eq!(v.menu.page, Some(Page::Pane));
@@ -190,9 +230,75 @@ mod tests {
         }
     }
 
+    /// Shows the "inactive" pane over a cancelled connection, so input is
+    /// routed for real but nothing reaches a daemon. Returns a point inside it.
+    fn live_pane(
+        v: &mut HerdrWindow,
+        mouse_reporting: bool,
+        window: &mut Window,
+        cx: &mut Context<HerdrWindow>,
+    ) -> Point<Pixels> {
+        use herdr_client::protocol::{FrameData, PaneSurfaceFrame, PaneSurfacePane, SurfaceRect};
+        // Initialize surface interest without connecting to a personal daemon.
+        // A cancelled handle lets queue-failure paths run deterministically.
+        v.reconnect();
+        let client = herdr_client::connect(
+            herdr_client::ConnectTarget::Socket("/unused-pane-menu-test.sock".into()),
+            v.options,
+        )
+        .unwrap();
+        client.handle.disconnect();
+        v.endpoints[0].connection.handle = Some(client.handle);
+        let snapshot = snapshot();
+        let rect = SurfaceRect {
+            x: 0,
+            y: 0,
+            width: v.options.surface_size.cols,
+            height: v.options.surface_size.rows,
+        };
+        v.live.surface = Some(Arc::new(PaneSurfaceFrame {
+            boot_id: snapshot.boot_id.clone(),
+            projection_revision: snapshot.revision,
+            surface_revision: 1,
+            frame: FrameData {
+                width: rect.width,
+                height: rect.height,
+                cells: vec![],
+                cursor: None,
+                hyperlinks: vec![],
+                graphics: vec![],
+            },
+            panes: vec![PaneSurfacePane {
+                pane_id: "inactive".into(),
+                content_revision: 1,
+                rect,
+                inner_rect: rect,
+                scrollbar_rect: None,
+                scroll: None,
+                focused: false,
+                mouse_reporting,
+                sgr_pixel_mouse: false,
+                alternate_screen_active: false,
+                pixel_width: 0,
+                pixel_height: 0,
+            }],
+            splits: vec![],
+            popup: None,
+            graphics: Default::default(),
+        }));
+        v.live.snapshot = Some(Arc::new(snapshot));
+        v.live.status = crate::state::ConnectionStatus::Connected;
+        assert!(v.input_ready());
+        v.dismiss_menu(window, cx);
+        v.bounds.origin
+            + point(
+                px(v.cell_width * 2.),
+                px(v.config.terminal.line_height() * 2.),
+            )
+    }
+
     #[gpui::test]
     fn right_click_targets_inactive_pane_and_blocks_stale_surfaces(cx: &mut TestAppContext) {
-        use herdr_client::protocol::{FrameData, PaneSurfaceFrame, PaneSurfacePane, SurfaceRect};
         let (view, cx) = cx.add_window_view(|window, cx| {
             crate::bind_keys(cx);
             crate::sidebar::layout_tests::fixture_window(window, cx)
@@ -201,66 +307,8 @@ mod tests {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
         });
-        let position = cx.update(|window, cx| {
-            view.update(cx, |v, cx| {
-                // Initialize surface interest without connecting to a personal daemon.
-                // A cancelled handle lets queue-failure paths run deterministically.
-                v.reconnect();
-                let client = herdr_client::connect(
-                    herdr_client::ConnectTarget::Socket("/unused-pane-menu-test.sock".into()),
-                    v.options,
-                )
-                .unwrap();
-                client.handle.disconnect();
-                v.endpoints[0].connection.handle = Some(client.handle);
-                let snapshot = snapshot();
-                let rect = SurfaceRect {
-                    x: 0,
-                    y: 0,
-                    width: v.options.surface_size.cols,
-                    height: v.options.surface_size.rows,
-                };
-                v.live.surface = Some(Arc::new(PaneSurfaceFrame {
-                    boot_id: snapshot.boot_id.clone(),
-                    projection_revision: snapshot.revision,
-                    surface_revision: 1,
-                    frame: FrameData {
-                        width: rect.width,
-                        height: rect.height,
-                        cells: vec![],
-                        cursor: None,
-                        hyperlinks: vec![],
-                        graphics: vec![],
-                    },
-                    panes: vec![PaneSurfacePane {
-                        pane_id: "inactive".into(),
-                        content_revision: 1,
-                        rect,
-                        inner_rect: rect,
-                        scrollbar_rect: None,
-                        scroll: None,
-                        focused: false,
-                        mouse_reporting: false,
-                        sgr_pixel_mouse: false,
-                        alternate_screen_active: false,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    }],
-                    splits: vec![],
-                    popup: None,
-                    graphics: Default::default(),
-                }));
-                v.live.snapshot = Some(Arc::new(snapshot));
-                v.live.status = crate::state::ConnectionStatus::Connected;
-                assert!(v.input_ready());
-                v.dismiss_menu(window, cx);
-                v.bounds.origin
-                    + point(
-                        px(v.cell_width * 2.),
-                        px(v.config.terminal.line_height() * 2.),
-                    )
-            })
-        });
+        let position =
+            cx.update(|window, cx| view.update(cx, |v, cx| live_pane(v, false, window, cx)));
         // Use the actual terminal mouse handler, not just menu construction.
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -325,6 +373,84 @@ mod tests {
                 assert!(v.menu.page.is_none());
             })
         });
+    }
+
+    /// Herdr's per-pane routing decides where a plain right-click goes, even
+    /// for a mouse-aware application; a modifier always reaches the menu so the
+    /// routing can be switched back, and a pane without mouse reporting cannot
+    /// take the click, so it falls back to the menu.
+    #[gpui::test]
+    fn right_click_follows_the_panes_routing(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            crate::bind_keys(cx);
+            crate::sidebar::layout_tests::fixture_window(window, cx)
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let route = |view: &Entity<HerdrWindow>, cx: &mut VisualTestContext, routed: bool| {
+            cx.update(|window, cx| {
+                view.update(cx, |v, cx| {
+                    v.dismiss_menu(window, cx);
+                    // Only the click under test may report a send failure.
+                    v.last_queued_options = Some(v.options);
+                    v.local_error = None;
+                    let snapshot = Arc::make_mut(v.live.snapshot.as_mut().unwrap());
+                    for pane in &mut snapshot.panes {
+                        pane.right_click_passthrough = routed && pane.pane_id == "inactive";
+                    }
+                });
+                window.draw(cx).clear(cx);
+            });
+        };
+        let position =
+            cx.update(|window, cx| view.update(cx, |v, cx| live_pane(v, true, window, cx)));
+        // The cancelled test connection reports a click it was asked to send,
+        // which tells a forwarded click from one the window kept.
+        let forwarded = |view: &Entity<HerdrWindow>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                v.local_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("Mouse input not sent"))
+            })
+        };
+        let menu_target = |view: &Entity<HerdrWindow>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                (v.menu.page == Some(Page::Pane))
+                    .then(|| v.menu.pane.as_ref().unwrap().target.right_click_passthrough)
+            })
+        };
+
+        route(&view, cx, false);
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+        assert_eq!(menu_target(&view, cx), Some(false));
+        assert!(!forwarded(&view, cx));
+
+        route(&view, cx, true);
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+        assert_eq!(menu_target(&view, cx), None);
+        assert!(forwarded(&view, cx));
+
+        for modifiers in [Modifiers::shift(), Modifiers::control(), Modifiers::alt()] {
+            route(&view, cx, true);
+            cx.simulate_mouse_down(position, MouseButton::Right, modifiers);
+            cx.simulate_mouse_up(position, MouseButton::Right, modifiers);
+            assert_eq!(menu_target(&view, cx), Some(true));
+            assert!(!forwarded(&view, cx));
+        }
+
+        route(&view, cx, true);
+        cx.update(|window, cx| {
+            view.update(cx, |v, _| {
+                Arc::make_mut(v.live.surface.as_mut().unwrap()).panes[0].mouse_reporting = false;
+            });
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+        assert_eq!(menu_target(&view, cx), Some(true));
+        assert!(!forwarded(&view, cx));
     }
 
     #[gpui::test]
@@ -430,17 +556,33 @@ struct Target {
     tab: String,
     pane: String,
     label: String,
+    /// The focused pane when it is another one in the same tab, which "Swap
+    /// with focused pane" trades places with.
+    focused: Option<String>,
+    /// Herdr routes this pane's right-clicks to its application, as seen when
+    /// the menu opened; the toggle asks for the other routing.
+    right_click_passthrough: bool,
 }
 
 impl Target {
     fn capture(snapshot: &ClientShellSnapshot, id: &str) -> Option<Self> {
         let pane = snapshot.panes.iter().find(|pane| pane.pane_id == id)?;
+        let focused = snapshot.focused_pane_id.as_ref().filter(|focused| {
+            **focused != pane.pane_id
+                && snapshot.panes.iter().any(|p| {
+                    p.pane_id == **focused
+                        && p.tab_id == pane.tab_id
+                        && p.workspace_id == pane.workspace_id
+                })
+        });
         let target = Self {
             boot: snapshot.boot_id.clone(),
             workspace: pane.workspace_id.clone(),
             tab: pane.tab_id.clone(),
             pane: pane.pane_id.clone(),
             label: pane.label.clone().unwrap_or_default(),
+            focused: focused.cloned(),
+            right_click_passthrough: pane.right_click_passthrough,
         };
         target.validate(snapshot).ok()?;
         Some(target)
@@ -475,7 +617,10 @@ enum Action {
     Rename,
     SplitRight,
     SplitDown,
+    Swap,
     Zoom,
+    EditScrollback,
+    RightClick,
     Close,
 }
 
@@ -490,22 +635,55 @@ impl Action {
                     "focus": true,
                 }),
             ),
+            // The focused pane moves to this one's place and keeps focus,
+            // as Herdr's directional swaps move it.
+            Self::Swap => (
+                Method::PaneSwap,
+                json!({"source_pane_id": target.focused.as_ref()?, "target_pane_id": target.pane}),
+            ),
             Self::Zoom => (
                 Method::PaneZoom,
                 json!({"pane_id": target.pane, "mode": "toggle"}),
             ),
-            Self::Rename | Self::Close => return None,
+            Self::RightClick => (
+                Method::PaneInputSet,
+                json!({
+                    "pane_id": target.pane,
+                    "right_click": if target.right_click_passthrough { "herdr" } else { "pane" },
+                }),
+            ),
+            Self::Rename | Self::EditScrollback | Self::Close => return None,
         })
+    }
+
+    fn label(self, label: &'static str, target: &Target) -> &'static str {
+        match self {
+            Self::RightClick if target.right_click_passthrough => "Open This Menu on Right-Click",
+            _ => label,
+        }
     }
 }
 
-const ACTIONS: [(Action, &str); 5] = [
+const ACTIONS: [(Action, &str); 8] = [
     (Action::Rename, "Rename"),
     (Action::SplitRight, "Split Right"),
     (Action::SplitDown, "Split Down"),
+    (Action::Swap, "Swap with Focused Pane"),
     (Action::Zoom, "Toggle Zoom"),
+    (Action::EditScrollback, "Open Scrollback in Editor"),
+    (Action::RightClick, "Send Right-Clicks to Pane"),
     (Action::Close, "Close"),
 ];
+
+impl PaneMenu {
+    /// The rows this menu offers: a swap needs another pane to trade with.
+    fn actions(&self) -> Vec<(Action, &'static str)> {
+        ACTIONS
+            .into_iter()
+            .filter(|(action, _)| !matches!(action, Action::Swap) || self.target.focused.is_some())
+            .collect()
+    }
+}
 
 pub(super) struct PaneMenu {
     target: Target,
@@ -571,6 +749,35 @@ impl HerdrWindow {
         });
     }
 
+    /// Opens the focused pane's rename dialog, as its menu's "Rename" row
+    /// would, at the pane's top-left corner.
+    pub(super) fn rename_focused_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.focused_pane_id.clone())
+        else {
+            return;
+        };
+        let origin = self.bounds.origin;
+        let anchor = self
+            .live
+            .surface
+            .as_ref()
+            .and_then(|surface| surface.panes.iter().find(|pane| pane.pane_id == id))
+            .map_or(origin, |pane| {
+                point(
+                    origin.x + px(f32::from(pane.rect.x) * self.cell_width),
+                    origin.y + px(f32::from(pane.rect.y) * self.config.terminal.line_height()),
+                )
+            });
+        self.open_pane_menu(&id, anchor, window, cx);
+        if self.menu.page == Some(Page::Pane) {
+            self.activate_pane_menu(Action::Rename, window, cx);
+        }
+    }
+
     fn validate_pane_target(&self) -> crate::Result<&Target> {
         if !self.menu_target_current() {
             return Err(crate::Error::StaleConnection);
@@ -631,6 +838,40 @@ impl HerdrWindow {
                     // Keep the original endpoint fence, rather than reopening the menu.
                     self.menu.page = Some(Page::ConfirmClose);
                     cx.notify();
+                }
+            }
+            Action::EditScrollback => {
+                let result = (|| {
+                    if !self.live.supports_edit_scrollback {
+                        return Err(herdr_client::Error::UnsupportedMethod.into());
+                    }
+                    if !self.input_ready() {
+                        return Err(crate::Error::ConnectionNotReady);
+                    }
+                    let handle = self.endpoints[self.selected_endpoint]
+                        .connection
+                        .handle
+                        .as_ref()
+                        .ok_or(crate::Error::NotConnected)?;
+                    // The daemon opens only its focused pane's history, and
+                    // runs requests in order, so focusing first is enough.
+                    let focused = self
+                        .live
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.focused_pane_id.as_deref());
+                    if focused != Some(target.pane.as_str()) {
+                        handle.focus_pane(&target.boot, &target.pane)?;
+                    }
+                    handle.edit_scrollback(&target.boot, &target.pane)?;
+                    Ok::<_, crate::Error>(())
+                })();
+                match result {
+                    Ok(()) => {
+                        self.fence_focus_change(None);
+                        self.dismiss_menu(window, cx);
+                    }
+                    Err(error) => self.pane_error(error, cx),
                 }
             }
             action => {
@@ -780,17 +1021,21 @@ impl HerdrWindow {
                 self.submit_pane_rename(window, cx)
             }
             "up" | "down" if self.menu.page == Some(Page::Pane) => {
+                let count = pane.actions().len();
                 pane.selected = Some(match (pane.selected, key) {
-                    (None, "up") => ACTIONS.len() - 1,
+                    (None, "up") => count - 1,
                     (None, _) => 0,
-                    (Some(i), "up") => (i + ACTIONS.len() - 1) % ACTIONS.len(),
-                    (Some(i), _) => (i + 1) % ACTIONS.len(),
+                    (Some(i), "up") => (i + count - 1) % count,
+                    (Some(i), _) => (i + 1) % count,
                 });
                 cx.notify();
             }
             "enter" => {
-                if let Some(index) = pane.selected {
-                    self.activate_pane_menu(ACTIONS[index].0, window, cx);
+                if let Some((action, _)) = pane
+                    .selected
+                    .and_then(|index| pane.actions().get(index).copied())
+                {
+                    self.activate_pane_menu(action, window, cx);
                 }
             }
             _ => {}
@@ -803,7 +1048,7 @@ impl HerdrWindow {
         };
         let mut body = div().flex().flex_col();
         if self.menu.page == Some(Page::Pane) {
-            for (index, (action, label)) in ACTIONS.into_iter().enumerate() {
+            for (index, (action, label)) in pane.actions().into_iter().enumerate() {
                 body = body.child(
                     div()
                         .id(("pane-menu-action", index))
@@ -817,7 +1062,7 @@ impl HerdrWindow {
                             row.bg(rgb(self.theme.active))
                         })
                         .hover(|row| row.bg(rgb(self.theme.active)))
-                        .child(label)
+                        .child(action.label(label, &pane.target))
                         .on_hover(cx.listener(move |this, hovered, _, cx| {
                             if *hovered && let Some(pane) = &mut this.menu.pane {
                                 pane.selected = Some(index);
