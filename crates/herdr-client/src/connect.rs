@@ -150,6 +150,7 @@ pub fn connect_with_connector<T: Into<Transport>>(
                 stop,
                 next_request: AtomicU64::new(1),
                 image_busy: Arc::new(AtomicBool::new(false)),
+                last_queued_theme: Default::default(),
             }),
         },
         events,

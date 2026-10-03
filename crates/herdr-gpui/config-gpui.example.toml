@@ -4,7 +4,10 @@
 # Herdr GUI settings. Independent of the daemon config, except where a setting
 # below says it starts from one the daemon config already carries.
 # Save at $XDG_CONFIG_HOME/herdr/config-gpui.toml (default ~/.config/herdr/).
-# Omitted settings use defaults. Font sizes are logical pixels, inclusive 8..48.
+# Omitted settings use defaults. Keys this build does not know, such as ones a
+# newer build reads, are ignored and named in a dismissible warning instead of
+# failing the load. [github] credentials are still refused.
+# Font sizes are logical pixels, inclusive 8..48.
 # Font families below are examples; leave them commented to use platform defaults.
 # Fonts must be installed locally; none are bundled.
 # Powerline separators and Nerd Font icons live in the Private Use Area, which
@@ -15,6 +18,7 @@
 
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.
+# Set "Follow Herdr" in config-gpui.local.toml to follow the local Herdr theme.
 theme = "Default"
 # How far the app's own colors (status dots, pull request badges, diff counts,
 # warnings, dim labels) stand off the sidebar and menus. "standard" moves a
@@ -28,6 +32,10 @@ contrast = "standard"
 confirm_close_tab = true
 # Show the Agents section below Spaces in the sidebar.
 show_agents = true
+# Show CPU and memory: the selected host's in the status bar, and each host's
+# on its sidebar row. Connected remote hosts are read over SSH every couple of
+# seconds; false stops all sampling. Also under Settings > General.
+show_system_load = true
 # macOS only: whether Option-letter reaches a pane as an Alt shortcut (Alt-P
 # for Option-P) or types the character the keyboard layout puts there. "auto"
 # sends Alt on the U.S. and ABC layouts and types elsewhere, so layouts that
@@ -47,13 +55,16 @@ open_links_in = "system"
 # only) draw rows with a design of their own. View > Layout lists them all.
 layout = "normal"
 
-[notifications]
-# GUI-local in-app delivery only. QA previews bypass delivery policy.
-enabled = false
+# Inherit shared [ui.toast] delivery, delay_seconds, and herdr.position.
+# Only delivery = "herdr" enables in-app toasts; "off", "terminal", and "system"
+# do not. QA previews bypass delivery policy. In config-gpui.local.toml, each
+# explicit key overrides the shared setting independently, including false.
+# [notifications]
+# enabled = false
 # Inclusive 0..3600. Custom notifications are immediate.
-delay_seconds = 1
+# delay_seconds = 1
 # top-left, top-right, bottom-left, bottom-right. Explicit wire corners win.
-position = "bottom-right"
+# position = "bottom-right"
 
 # The "copied to clipboard" flash shown after a terminal selection is copied.
 # Left commented out, this follows the daemon config's [ui.toast.clipboard], so
@@ -65,6 +76,14 @@ position = "bottom-right"
 # top-left, top-center, top-right, bottom-left, bottom-center, bottom-right.
 # The position also places the note saying why New Worktree opened no dialog.
 # position = "bottom-center"
+
+# What a pane's terminal bell (BEL) does. Herdr has no bell setting of its own:
+# it forwards each bell to the focused client, as an outer terminal would see it.
+# [bell]
+# Bounce the Dock icon while the window is in the background.
+# attention = true
+# Play the system alert sound.
+# sound = false
 
 # To customize spacing too, REPLACE the top-level layout above with this table:
 # [layout]
@@ -110,6 +129,13 @@ position = "bottom-right"
 # open_notification_target = "cmd-alt-n"
 # quit = "cmd-q"
 # Unbound by default: themes, reconnect, logs, about.
+
+# Saved SSH devices use the local keybindings above, as `herdr --remote` does.
+# "server" uses the [keys] profile that device's Herdr publishes instead, like
+# `herdr --remote-keybindings server`; [keybindings] still apply on top. Keyed
+# by catalog ID; a device's right-click menu toggles it.
+# [devices.0123456789abcdef0123456789abcdef]
+# keybindings = "server"
 
 # Preferences offers a searchable picker for all four families together or each row.
 # Platform default removes the local family override; fallback cascades remain active.
@@ -177,7 +203,7 @@ size = 12
 # which is saved in its own 0600 coder-credentials file. Default is false.
 # allow_plaintext_credentials = false
 
-# Optional behaviors, all off unless turned on here. Unknown keys are rejected.
+# Optional behaviors, all off unless turned on here.
 # [features]
 # Open a space's menu when the pointer rests on its sidebar row, without a
 # right click. Moving the pointer anywhere but into that menu closes it again.
@@ -189,6 +215,10 @@ size = 12
 # cookie set below on this machine.
 # [usage]
 # show = true
+# Daemon toolbar segments, including plugin usage percentages; independent of show.
+# topbar = true
+# Honor the daemon's [ui.sidebar] rows and plugin tokens; false uses native layouts.
+# inline = true
 # Show these even when no sign-in was found, with what to set up.
 # show_providers = ["cursor", "openrouter"]
 # Never show these, even when signed in.
@@ -266,7 +296,9 @@ size = 12
 # OpenCode Go (opencodego)
 # [usage.providers.opencodego]
 #   An OpenCode API key for the account with the Go subscription, created at
-#   https://opencode.ai/auth under API Keys. Preferred over the cookie.
+#   https://opencode.ai/auth under API Keys. Preferred over the cookie. When
+#   unset, the key `opencode auth login` saved in
+#   ~/.local/share/opencode/auth.json is used.
 # api_key = ""  # or OPENCODE_API_KEY
 #   Your opencode.ai session, used when no API key is set. Sign in at
 #   https://opencode.ai/auth, open Developer Tools > Application > Cookies >

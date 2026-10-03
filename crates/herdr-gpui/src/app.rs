@@ -65,7 +65,7 @@ pub(crate) fn open_window(
             display_id,
             window_min_size: Some(size(px(640.), px(400.))),
             titlebar: Some(titlebar::options(WINDOW_TITLE)),
-            app_id: Some("so.pen.herdr-gpui".into()),
+            app_id: Some(crate::constants::APP_ID.into()),
             ..Default::default()
         },
         |window, cx| {
@@ -125,6 +125,11 @@ pub(crate) fn run() -> std::process::ExitCode {
     if let LaunchMode::Browser(command) = mode {
         return crate::control::run(command);
     }
+    // A separate app of its own: no daemon, control socket, stores, or updater.
+    #[cfg(feature = "mockup")]
+    if let LaunchMode::Mockup(options) = mode {
+        return crate::mockup::run(options);
+    }
     if mode == LaunchMode::BuildInfo {
         print!("{}", cli::build_info());
         return std::process::ExitCode::SUCCESS;
@@ -142,6 +147,10 @@ pub(crate) fn run() -> std::process::ExitCode {
         #[cfg(feature = "integration-test")]
         println!(
             "  --integration-test  Run native GUI checks (requires explicit --socket)\n  --sidebar-test      Run native sidebar fixtures without connecting to a daemon\n  --performance-test  Measure native dense-terminal hover/scroll without a daemon (macOS)"
+        );
+        #[cfg(feature = "mockup")]
+        println!(
+            "  --mockup [--feedback PATH]\n                      Compare the UI variants built in from HERDR_MOCKUP_FILE; must come first"
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -212,6 +221,7 @@ pub(crate) fn run() -> std::process::ExitCode {
             // Only the user's own app answers agents; native test modes stay private.
             if mode == LaunchMode::Normal {
                 crate::control::install(cx);
+                crate::window::system_notifications::install(cx);
             }
             cx.set_global(appearance);
             app_icon::install();

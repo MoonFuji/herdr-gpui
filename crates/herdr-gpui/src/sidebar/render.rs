@@ -4,7 +4,7 @@
 
 use super::{
     DEVICE_FOOTER_HEIGHT, HOST_ARROW_WIDTH, HOST_GAP, STATUS_WIDTH, SidebarDrag, agent_name,
-    agents::{agent_place, status_text},
+    agents::{Indicators, agent_place, state_label, status_text},
     agents_sort,
     cell::{AgentRow, Cell, Fold, RowContext, RowData, RowState, WorkspaceRow, layout_for},
     label_text,
@@ -12,8 +12,10 @@ use super::{
     line_height,
     reorder::{self, Plan},
     row::{RowIcon, RowLift, RowTree, removing_dot},
-    sidebar_width, sorted_agents, visible_workspace_entries,
-    workspaces::{workspace_badge, workspace_label},
+    sidebar_width, sorted_agents,
+    tokens::{self, SpaceContext},
+    visible_workspace_entries,
+    workspaces::{displayed_workspace_status, workspace_badge, workspace_label},
 };
 use crate::{
     Command, HerdrWindow, NavigationTarget,
@@ -25,6 +27,7 @@ use gpui::{prelude::*, *};
 impl HerdrWindow {
     pub(crate) fn render_sidebar(
         &self,
+        indicators: Indicators,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -42,6 +45,10 @@ impl HerdrWindow {
             (look.content_width(width) - HOST_ARROW_WIDTH - 2. * HOST_GAP - STATUS_WIDTH).max(0.);
         let view = cx.entity().downgrade();
         let font = &self.config.sidebar;
+        let agents_custom = self.config.usage.inline
+            && self.config.sidebar_layout.agents != crate::config::AgentLayout::default();
+        let spaces_custom = self.config.usage.inline
+            && self.config.sidebar_layout.spaces != crate::config::SpaceLayout::default();
         let theme = &self.theme;
         let mut spaces = div()
             .id("spaces-scroll")
@@ -63,6 +70,8 @@ impl HerdrWindow {
         agents = agents.track_scroll(&self.sidebar_scroll[1]);
         let multi = self.endpoints.len() > 1;
         let mut agent_count = 0;
+        // A plugin view hid every agent, rather than there being none.
+        let mut filtered = false;
         // Child positions of the highlighted rows, for the one-time reveal below.
         // Agent rows are counted by `agent_count`, which indexes that list.
         let mut space_rows = 0usize;
@@ -85,24 +94,46 @@ impl HerdrWindow {
                 let select_id = endpoint_id.clone();
                 let menu_id = endpoint_id.clone();
                 let removing = self.menu.removing_devices.contains(&endpoint.id);
-                // The removal pulse takes its room from the label, not from the status.
-                let label_width = if removing {
-                    (host_label_width - STATUS_WIDTH - HOST_GAP).max(0.)
-                } else {
-                    host_label_width
-                };
+                // A Coder workspace has no SSH host to read its load from.
+                let host = crate::usage::Host::of(&endpoint.connection.target);
+                let load = host
+                    .as_ref()
+                    .filter(|_| self.config.show_system_load)
+                    .and_then(|host| self.system_load.get(host));
+                // Densities with detail lines give the load its own line;
+                // compact ones fit gauges between the name and the status.
+                let load_line = load.filter(|_| layout.workspace_details());
+                let gauges = load.filter(|_| load_line.is_none()).map(|reading| {
+                    crate::system_load::gauges(
+                        reading,
+                        theme,
+                        super::metrics::glyph_width(font),
+                        (font.size * 0.8).round(),
+                    )
+                });
+                // The removal pulse and the gauges take their room from the
+                // label, not from the status.
+                let label_width = (host_label_width
+                    - if removing {
+                        STATUS_WIDTH + HOST_GAP
+                    } else {
+                        0.
+                    }
+                    - gauges.as_ref().map_or(0., |(width, _)| width + HOST_GAP))
+                .max(0.);
+                let lines = 1. + if load_line.is_some() { 1. } else { 0. };
                 spaces = spaces.child(
                     div()
                         .id(SharedString::from(format!("host-{endpoint_id}")))
                         .debug_selector(|| format!("host-{endpoint_id}"))
-                        .h(px(line_height(font)
+                        .h(px(lines * line_height(font)
                             + 2. * layout.host_padding()
                             + look.chrome_height()))
                         .flex_none()
                         .relative()
                         .flex()
-                        .items_center()
-                        .gap(px(HOST_GAP))
+                        .flex_col()
+                        .justify_center()
                         .px(px(content_x))
                         // Hosts mark selection only; they do not join the rows'
                         // hover group.
@@ -131,52 +162,95 @@ impl HerdrWindow {
                         )
                         .child(
                             div()
-                                .id(SharedString::from(format!("collapse-host-{endpoint_id}")))
-                                .w(px(HOST_ARROW_WIDTH))
-                                .flex_none()
-                                .child(label_text(if endpoint.collapsed {
-                                    "\u{25b8}"
-                                } else {
-                                    "\u{25be}"
-                                }))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(endpoint) =
-                                        this.endpoints.iter_mut().find(|e| e.id == collapse_id)
-                                    {
-                                        endpoint.collapsed = !endpoint.collapsed;
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .when(removing, |row| {
-                            row.child(removing_dot("host-removing", theme))
-                        })
-                        .child(
-                            div()
-                                // As with workspace labels, avoid zero-basis text measurement.
-                                .w(px(label_width))
-                                .flex_none()
-                                .overflow_hidden()
+                                .flex()
+                                .items_center()
+                                .gap(px(HOST_GAP))
                                 .child(
                                     div()
+                                        .id(SharedString::from(format!(
+                                            "collapse-host-{endpoint_id}"
+                                        )))
+                                        .w(px(HOST_ARROW_WIDTH))
+                                        .flex_none()
+                                        .child(label_text(if endpoint.collapsed {
+                                            "\u{25b8}"
+                                        } else {
+                                            "\u{25be}"
+                                        }))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            if let Some(endpoint) = this
+                                                .endpoints
+                                                .iter_mut()
+                                                .find(|e| e.id == collapse_id)
+                                            {
+                                                endpoint.collapsed = !endpoint.collapsed;
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .when(removing, |row| {
+                                    row.child(removing_dot("host-removing", theme))
+                                })
+                                .child(
+                                    div()
+                                        // As with workspace labels, avoid zero-basis text measurement.
                                         .w(px(label_width))
-                                        .truncate()
-                                        .child(label_text(&endpoint.label)),
+                                        .flex_none()
+                                        .overflow_hidden()
+                                        .child(
+                                            div()
+                                                .w(px(label_width))
+                                                .truncate()
+                                                .child(label_text(&endpoint.label)),
+                                        ),
+                                )
+                                .when_some(
+                                    gauges.zip(load).zip(host.clone()),
+                                    |row, (((_, gauges), reading), host)| {
+                                        row.child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "host-load-{endpoint_id}"
+                                                )))
+                                                .flex_none()
+                                                .child(gauges)
+                                                .tooltip(crate::system_load::tooltip(
+                                                    reading, &host, theme,
+                                                )),
+                                        )
+                                    },
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| format!("host-status-{endpoint_id}"))
+                                        .size(px(STATUS_WIDTH))
+                                        .flex_none()
+                                        .rounded_full()
+                                        .bg(rgb(if endpoint.live.status.is_connected() {
+                                            crate::menu::online(theme)
+                                        } else {
+                                            theme.muted
+                                        })),
                                 ),
                         )
-                        .child(
-                            div()
-                                .debug_selector(|| format!("host-status-{endpoint_id}"))
-                                .size(px(STATUS_WIDTH))
-                                .flex_none()
-                                .rounded_full()
-                                .bg(rgb(if endpoint.live.status.is_connected() {
-                                    crate::menu::online(theme)
-                                } else {
-                                    theme.muted
-                                })),
-                        )
+                        .when_some(load_line.zip(host), |row, (reading, host)| {
+                            row.child(
+                                div()
+                                    .id(SharedString::from(format!("host-load-{endpoint_id}")))
+                                    .h(px(line_height(font)))
+                                    .flex()
+                                    .items_center()
+                                    .pl(px(HOST_ARROW_WIDTH + HOST_GAP))
+                                    .overflow_hidden()
+                                    .child(crate::system_load::line(
+                                        reading,
+                                        theme,
+                                        Some(super::metrics::glyph_width(font)),
+                                    ))
+                                    .tooltip(crate::system_load::tooltip(reading, &host, theme)),
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.select_endpoint(&select_id, cx);
                             window.focus(&this.focus, cx);
@@ -185,6 +259,7 @@ impl HerdrWindow {
                 space_rows += 1;
             }
             let row_cx = RowContext {
+                indicators,
                 font,
                 theme,
                 look,
@@ -223,6 +298,10 @@ impl HerdrWindow {
                         self.sidebar_scroll[0].bounds_for_item(base + position),
                     ) {
                         heights[unit] += f32::from(bounds.size.height);
+                        if spaces_custom && !entry.1 {
+                            heights[unit] += f32::from(self.config.sidebar_layout.spaces.row_gap)
+                                * line_height(font);
+                        }
                     }
                 }
                 let slot = drag
@@ -236,6 +315,9 @@ impl HerdrWindow {
                     entries[position].1 && !entries.get(position + 1).is_some_and(|next| next.1)
                 })
                 .collect();
+            // Gap separates one repository from the next, not a parent from
+            // the linked worktrees under it. Reset per host.
+            let mut previous_indented = None;
             for (position, (index, indented, group)) in entries.into_iter().enumerate() {
                 if multi && endpoint.collapsed {
                     break;
@@ -300,6 +382,36 @@ impl HerdrWindow {
                     })),
                 });
                 let label = workspace_label(workspace, indented);
+                let shown_status = if self.config.usage.inline {
+                    displayed_workspace_status(&snapshot.workspaces, workspace, collapsed_repos)
+                } else {
+                    workspace.agent_status
+                };
+                let lines = if spaces_custom {
+                    tokens::space_rows(
+                        &self.config.sidebar_layout.spaces,
+                        SpaceContext {
+                            label,
+                            branch: workspace.branch.as_deref(),
+                            status: shown_status,
+                            ahead_behind: workspace.git_ahead_behind,
+                            tokens: &workspace.tokens,
+                            indented,
+                        },
+                    )
+                } else {
+                    Vec::new()
+                };
+                let gap = if spaces_custom {
+                    match previous_indented.replace(indented) {
+                        Some(_) if !indented => {
+                            f32::from(self.config.sidebar_layout.spaces.row_gap) * line_height(font)
+                        }
+                        _ => 0.,
+                    }
+                } else {
+                    0.
+                };
                 let element = Cell::new(
                     rows,
                     RowData::Workspace(WorkspaceRow {
@@ -334,6 +446,8 @@ impl HerdrWindow {
                                     &workspace.workspace_id,
                                 )
                             }),
+                        status: shown_status,
+                        lines,
                     }),
                     &row_cx,
                 )
@@ -442,6 +556,7 @@ impl HerdrWindow {
                         }),
                     )
                 })
+                .when(gap > 0., |row| row.mt(px(gap)))
                 .when(shift != px(0.), |row| row.top(shift));
                 spaces = if carried {
                     // Painted last so it floats over the rows it passes, while
@@ -454,10 +569,29 @@ impl HerdrWindow {
             if !self.config.show_agents {
                 continue;
             }
-            for agent in sorted_agents(&snapshot.agents, self.agent_sort) {
+            filtered |= snapshot.agent_view_label.is_some();
+            for agent in sorted_agents(snapshot, self.agent_sort) {
+                let lines = if agents_custom {
+                    let Some(lines) = tokens::agent_rows(
+                        &self.config.sidebar_layout.agents,
+                        agent,
+                        snapshot,
+                        row_cx.host,
+                    ) else {
+                        continue;
+                    };
+                    lines
+                } else {
+                    Vec::new()
+                };
                 if selected && agent.focused {
                     highlighted[1] = Some(agent_count);
                 }
+                let gap = if agents_custom && agent_count > 0 {
+                    f32::from(self.config.sidebar_layout.agents.row_gap) * line_height(font)
+                } else {
+                    0.
+                };
                 agent_count += 1;
                 let id = agent.pane_id.clone();
                 let navigate_endpoint = endpoint_id.clone();
@@ -472,14 +606,17 @@ impl HerdrWindow {
                             place: agent_place(agent, snapshot),
                             status_text: self
                                 .config
-                                .agent_status_text
-                                .shown_for(agent.agent.as_deref())
-                                .then(|| status_text(agent.agent_status)),
+                                .sidebar_layout
+                                .agents
+                                .shows_status_text(agent.agent.as_deref())
+                                .then(|| state_label(agent, status_text(agent.agent_status))),
+                            lines,
                         }),
                         &row_cx,
                     )
                     .selected(selected && agent.focused)
                     .row()
+                    .when(gap > 0., |row| row.mt(px(gap)))
                     .id(SharedString::from(format!("agent-{endpoint_id}-{id}")))
                     .when(multi, |row| {
                         row.debug_selector(|| format!("agent-{endpoint_id}-{id}"))
@@ -523,7 +660,11 @@ impl HerdrWindow {
                     .px(px(content_x))
                     .text_color(rgb(theme.muted))
                     .truncate()
-                    .child("no agents"),
+                    .child(label_text(if filtered {
+                        "no matching agents"
+                    } else {
+                        "no agents"
+                    })),
             );
         }
         div()
@@ -541,7 +682,7 @@ impl HerdrWindow {
             .text_size(px(font.size))
             .line_height(px(line_height(font)))
             .text_color(rgb(theme.foreground))
-            .bg(rgb(theme.surface))
+            .bg(rgb(theme.sidebar_background()))
             .border_r_1()
             .border_color(rgb(theme.active))
             // Zero flex bases keep long workspace lists from displacing agents.

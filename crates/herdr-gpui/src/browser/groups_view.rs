@@ -291,12 +291,24 @@ impl HerdrWindow {
         let Some(layout) = self.layout() else {
             return Shown::Terminal;
         };
-        let shown = layout.shown(group, |group| self.group_focused_tab(group));
+        let focused = |group| self.group_focused_tab(group);
+        let shown = layout.shown(group, focused);
         match &shown {
             Shown::Page(id) | Shown::Elsewhere(Pick::Page(id))
                 if store(cx).is_none_or(|store| store.get(*id).is_none()) =>
             {
                 Shown::Empty
+            }
+            // The window's connection is on its way to the tab its group
+            // picked and no other group shows it: the terminal keeps its
+            // frame until the daemon focuses the tab, rather than flashing
+            // a stand-in for one round trip.
+            Shown::Elsewhere(pick @ Pick::Herdr(tab))
+                if Some(group) == self.primary_group()
+                    && layout.holder(pick, &focused) == Some(group)
+                    && !self.parked_focuses(tab) =>
+            {
+                Shown::Terminal
             }
             _ => shown,
         }
@@ -384,6 +396,11 @@ impl HerdrWindow {
     /// for it.
     pub(crate) fn expect_new_tab_in(&mut self, group: GroupId) {
         self.browser.new_tab_group = self.browser_key().map(|key| (key, group));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expected_new_tab_group(&self) -> Option<GroupId> {
+        self.browser.new_tab_group.as_ref().map(|(_, group)| *group)
     }
 
     /// Follows the window's connection moving its focus, from a shortcut, an

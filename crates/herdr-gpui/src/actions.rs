@@ -16,6 +16,7 @@ actions!(
         ShowAll,
         Minimize,
         PlaySound,
+        RingBellPreview,
         ShowHerdrNotDetected,
         ShowLogs,
         CheckForUpdates,
@@ -71,6 +72,11 @@ pub(crate) struct ShowToastPreview {
     pub(crate) kind: herdr_client::protocol::SemanticNotificationKind,
 }
 
+/// QA: posts an OS notification for the focused pane after a short delay.
+#[derive(Clone, PartialEq, serde::Deserialize, Action)]
+#[action(no_json)]
+pub(crate) struct ShowSystemNotificationPreview;
+
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, PartialEq, serde::Deserialize, Action)]
 #[action(no_json)]
@@ -78,12 +84,17 @@ pub(crate) struct SetBadgePreview {
     pub(crate) enabled: bool,
 }
 
-/// Binds the keymap from the last validated config, or the catalog defaults
-/// before any config has loaded.
+/// Binds the active window's server keymap when its device opted into one,
+/// otherwise the keymap from the last validated config, or the catalog
+/// defaults before any config has loaded.
 pub(crate) fn bind_keys(cx: &mut App) {
     let keymap = cx
-        .try_global::<crate::app::InitialAppearance>()
-        .map(|appearance| appearance.config.keybindings.clone())
+        .try_global::<crate::window::ActiveServerKeymap>()
+        .and_then(|active| active.0.clone())
+        .or_else(|| {
+            cx.try_global::<crate::app::InitialAppearance>()
+                .map(|appearance| appearance.config.keybindings.clone())
+        })
         .unwrap_or_default();
     cx.bind_keys(keymap.bindings().map(|(command, keystroke)| {
         if command == Command::Quit {
@@ -93,6 +104,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         }
     }));
     cx.bind_keys(crate::log_window::key_bindings());
+    cx.bind_keys(crate::settings_window::key_bindings());
     cx.bind_keys([
         KeyBinding::new("cmd-x", Cut, Some(EDIT_MENU_LABELS)),
         KeyBinding::new("cmd-c", Copy, Some(EDIT_MENU_LABELS)),

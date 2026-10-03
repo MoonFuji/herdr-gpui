@@ -8,13 +8,17 @@ use crate::{
     browser::{Fold, GroupId, Leaving, Listed, Pick, Shown, Slot, ThumbDrag},
     controls::Command,
     fonts::StyledFont,
-    sidebar::{STATUS_WIDTH, status_dot},
+    herdr_settings::TabBarPosition,
+    sidebar::{Indicators, status_indicator},
 };
 use gpui::{prelude::*, *};
 use herdr_client::protocol::AgentStatus;
 
-/// The gap between a Herdr tab's status dot and its title.
+/// The gap between a Herdr tab's status indicator and its title.
 const DOT_GAP: f32 = 6.;
+
+/// How large the mark after a zoomed tab's title draws, `DOT_GAP` after it.
+const ZOOM_ICON: f32 = 11.;
 
 /// How tall the thumb along a scrolling strip's foot draws.
 const THUMB_HEIGHT: f32 = 4.;
@@ -31,7 +35,7 @@ const THUMB_HELD_ALPHA: u32 = 0xc0;
 enum Lead {
     Nothing,
     /// A Herdr tab whose agents report a status.
-    Dot,
+    Status,
     /// A browser tab's globe.
     Globe,
 }
@@ -42,7 +46,7 @@ impl Lead {
     fn of(status: AgentStatus) -> Self {
         match status {
             AgentStatus::Unknown => Self::Nothing,
-            _ => Self::Dot,
+            _ => Self::Status,
         }
     }
 }
@@ -70,7 +74,14 @@ impl HerdrWindow {
 
     /// How wide a tab with `label` draws, as its padding, gaps, close
     /// button, and whatever leads its title add up around the shaped text.
-    fn tab_width(&self, label: &SharedString, lead: Lead, window: &Window) -> f32 {
+    fn tab_width(
+        &self,
+        label: &SharedString,
+        lead: Lead,
+        zoomed: bool,
+        indicators: Indicators,
+        window: &Window,
+    ) -> f32 {
         let run = TextRun {
             len: label.len(),
             font: self.config.tabs.font(),
@@ -89,10 +100,12 @@ impl HerdrWindow {
         // a status dot or a browser tab's globe, and its gap.
         let chrome = match lead {
             Lead::Nothing => 12. + 10.,
-            Lead::Dot => 12. + STATUS_WIDTH + DOT_GAP + 10.,
+            Lead::Status => 12. + indicators.width(&self.config.tabs) + DOT_GAP + 10.,
             Lead::Globe => 10. + 12. + 6. + 6.,
         };
-        (chrome + text + 18. + 3. + 1.).max(TAB_WIDTH)
+        let zoom = if zoomed { DOT_GAP + ZOOM_ICON } else { 0. };
+        // GPUI rounds the text element's intrinsic width up during layout.
+        (chrome + zoom + text.ceil() + 18. + 3. + 1.).max(TAB_WIDTH)
     }
 
     /// A closed tab where it stood, narrowing and fading out.
@@ -117,12 +130,25 @@ impl HerdrWindow {
             .into_any_element()
     }
 
+    /// Height of a group's tab strip, which grows with the tab font.
+    pub(super) fn tab_strip_height(&self) -> f32 {
+        (self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)
+    }
+
     fn render_tab_strip(&mut self, slot: Slot, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let pick = self.group_pick(slot.id);
+        let indicators = Indicators::new(
+            self.settings.shared.as_ref(),
+            matches!(
+                cx.window_appearance(),
+                WindowAppearance::Light | WindowAppearance::VibrantLight
+            ),
+            &self.theme,
+        );
         // What the strip lists, measured, so the ones that just opened grow
         // in and the ones that just closed shrink out where they stood.
         let now = std::time::Instant::now();
-        let herdr: Vec<((Pick, SharedString), Lead)> = self
+        let herdr: Vec<((Pick, SharedString), Lead, bool)> = self
             .live
             .snapshot
             .as_ref()
@@ -138,6 +164,7 @@ impl HerdrWindow {
                                 SharedString::from(t.label.clone()),
                             ),
                             Lead::of(t.agent_status),
+                            t.zoomed,
                         )
                     })
                     .collect()
@@ -148,11 +175,11 @@ impl HerdrWindow {
             .chain(
                 self.browser_tab_labels(cx)
                     .into_iter()
-                    .map(|entry| (entry, Lead::Globe)),
+                    .map(|entry| (entry, Lead::Globe, false)),
             )
-            .filter(|((pick, _), _)| self.group_lists(slot.id, pick))
-            .map(|((pick, label), lead)| Listed {
-                width: self.tab_width(&label, lead, window),
+            .filter(|((pick, _), _, _)| self.group_lists(slot.id, pick))
+            .map(|((pick, label), lead, zoomed)| Listed {
+                width: self.tab_width(&label, lead, zoomed, indicators, window),
                 pick,
                 label,
             })
@@ -167,7 +194,7 @@ impl HerdrWindow {
             .id(SharedString::from(slot.selector("tabs")))
             .flex()
             .flex_none()
-            .h(px((self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)))
+            .h(px(self.tab_strip_height()))
             .text_font(&self.config.tabs)
             .text_size(px(self.config.tabs.size))
             .overflow_x_scroll()
@@ -215,15 +242,36 @@ impl HerdrWindow {
                                 .flex()
                                 .items_center()
                                 .gap(px(DOT_GAP))
-                                .when(Lead::of(tab.agent_status) == Lead::Dot, |title| {
+                                .when(Lead::of(tab.agent_status) == Lead::Status, |title| {
                                     title.child(
-                                        status_dot(tab.agent_status, &self.theme).debug_selector({
+                                        status_indicator(
+                                            tab.agent_status,
+                                            &self.config.tabs,
+                                            indicators,
+                                        )
+                                        .mt_0()
+                                        .debug_selector({
                                             let id = id.clone();
                                             move || slot.selector(&format!("tab-status-{id}"))
                                         }),
                                     )
                                 })
-                                .child(tab.label.clone()),
+                                .child(tab.label.clone())
+                                // Herdr's " Z": one pane fills the tab, the
+                                // rest are hidden behind it.
+                                .when(tab.zoomed, |title| {
+                                    title.child(
+                                        svg()
+                                            .path("icons/zoom.svg")
+                                            .debug_selector({
+                                                let id = id.clone();
+                                                move || slot.selector(&format!("tab-zoom-{id}"))
+                                            })
+                                            .flex_none()
+                                            .size(px(ZOOM_ICON))
+                                            .text_color(rgb(text)),
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -270,7 +318,13 @@ impl HerdrWindow {
                             MouseButton::Right,
                             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
-                                this.open_tab_menu(&context_id, event.position, window, cx);
+                                this.open_tab_menu(
+                                    &context_id,
+                                    Some(slot.id),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
                                 this.menu.opening_right_click =
                                     this.menu.page == Some(crate::menu::Page::Tab);
                             }),
@@ -662,8 +716,33 @@ impl HerdrWindow {
             .into_any_element()
     }
 
-    /// One group: its strip above what it shows. Pressing anywhere in it
-    /// makes it the group in use.
+    /// Where Herdr's shared config puts the tab row.
+    fn tab_bar_position(&self) -> TabBarPosition {
+        self.settings
+            .shared
+            .as_ref()
+            .map(|shared| shared.tab_bar_position)
+            .unwrap_or_default()
+    }
+
+    /// Whether `group`'s strip steps aside under Herdr's
+    /// `hide_tab_bar_when_single_tab`: only when the window is not split, so
+    /// every group keeps the strip that names it and takes dropped tabs, and
+    /// only while the strip would list one tab at most, browser tabs counted.
+    pub(super) fn strip_hidden(&self, group: GroupId, cx: &App) -> bool {
+        self.settings
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.hide_tab_bar_when_single_tab)
+            && !self.is_split()
+            && self.folding_groups().is_empty()
+            && !self.tab_drag_in(group)
+            && self.group_tabs(group, cx).len() <= 1
+    }
+
+    /// One group: its strip above or below what it shows, as Herdr's
+    /// `tab_bar_position` places it. Pressing anywhere in it makes it the
+    /// group in use.
     pub(super) fn render_group(
         &mut self,
         slot: Slot,
@@ -671,7 +750,9 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let strip = self.render_tab_strip(slot, window, cx);
+        let strip =
+            (!self.strip_hidden(slot.id, cx)).then(|| self.render_tab_strip(slot, window, cx));
+        let bottom = self.tab_bar_position() == TabBarPosition::Bottom;
         let share = (self.is_split() || !self.folding_groups().is_empty())
             .then(|| self.group_share(slot.id));
         let opened = self.group_opened(slot.id);
@@ -695,8 +776,11 @@ impl HerdrWindow {
                     this.activate_group(slot.id, window, cx);
                 }
             }))
-            .child(strip)
-            .child(body);
+            .map(|column| match (strip, bottom) {
+                (Some(strip), false) => column.child(strip).child(body),
+                (Some(strip), true) => column.child(body).child(strip),
+                (None, _) => column.child(body),
+            });
         div()
             .flex()
             .justify_end()
@@ -726,10 +810,13 @@ impl HerdrWindow {
             .border_l_1()
             .border_color(rgb(self.theme.active))
             .bg(rgb(self.theme.background))
+            .when(self.tab_bar_position() == TabBarPosition::Bottom, |group| {
+                group.justify_end()
+            })
             .child(
                 div()
                     .flex_none()
-                    .h(px((self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)))
+                    .h(px(self.tab_strip_height()))
                     .bg(rgb(self.theme.surface)),
             )
             .into_any_element()
@@ -800,14 +887,86 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::sidebar::STATUS_WIDTH;
     use core::prelude::v1::test;
     use std::sync::Arc;
 
     #[gpui::test]
     fn a_tab_leads_its_title_with_its_status_dot_unless_unknown(cx: &mut TestAppContext) {
-        let label = "a title long enough to outgrow the narrowest tab";
-        let (_, cx) = cx.add_window_view(|window, cx| {
+        status_layout(cx, None, crate::config::Config::default().tabs.size);
+    }
+
+    #[gpui::test]
+    fn shared_custom_dots_keep_the_tab_label_centered(cx: &mut TestAppContext) {
+        status_layout(
+            cx,
+            Some("[ui]\nstatus_indicators = 'dots'\n[theme.custom]\nyellow = '#123456'\n"),
+            19.,
+        );
+    }
+
+    #[gpui::test]
+    fn shared_symbols_extend_the_tab_without_displacing_its_label(cx: &mut TestAppContext) {
+        status_layout(
+            cx,
+            Some("[ui]\nstatus_indicators = 'symbols'\n[theme.custom]\nyellow = '#ff9900'\n"),
+            19.,
+        );
+    }
+
+    /// A zoomed tab carries its mark after the title, inside the width
+    /// measured for it, and a tab that is not zoomed carries none.
+    #[gpui::test]
+    fn zoomed_tab_shows_its_mark_within_its_width(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            let mut snapshot: herdr_client::protocol::ClientShellSnapshot = serde_json::from_str(
+                include_str!("../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"),
+            )
+            .unwrap();
+            snapshot.tabs[0].zoomed = true;
+            // Long enough that neither width is the narrowest tab's.
+            snapshot.tabs[0].label = "a title long enough to outgrow the narrowest tab".into();
+            let mut plain = snapshot.tabs[0].clone();
+            plain.tab_id = "plain".into();
+            plain.focused = false;
+            plain.zoomed = false;
+            snapshot.tabs.push(plain);
+            view.live.snapshot = Some(Arc::new(snapshot));
+            view
+        });
+        cx.simulate_resize(size(px(1600.), px(600.)));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("tab-zoom-plain").is_none());
+        let tab = cx.debug_bounds("tab-w1:t1").unwrap();
+        let mark = cx.debug_bounds("tab-zoom-w1:t1").unwrap();
+        let close = cx.debug_bounds("close-tab-w1:t1").unwrap();
+        assert_eq!(mark.size, size(px(ZOOM_ICON), px(ZOOM_ICON)));
+        assert!(mark.right() <= close.left(), "{mark:?} before {close:?}");
+        assert!((mark.center().y - tab.center().y).abs() <= px(0.5));
+        let (zoomed, unzoomed) = cx.update(|window, cx| {
+            let view = view.read(cx);
+            let indicators = Indicators::new(None, false, &view.theme);
+            let label = view.live.snapshot.as_ref().unwrap().tabs[0].label.clone();
+            let lead = Lead::of(view.live.snapshot.as_ref().unwrap().tabs[0].agent_status);
+            (
+                view.tab_width(&label.clone().into(), lead, true, indicators, window),
+                view.tab_width(&label.into(), lead, false, indicators, window),
+            )
+        });
+        assert_eq!(zoomed - unzoomed, DOT_GAP + ZOOM_ICON);
+        assert!((tab.size.width - px(zoomed)).abs() <= px(0.5), "{tab:?}");
+    }
+
+    fn status_layout(cx: &mut TestAppContext, settings: Option<&str>, font_size: f32) {
+        let label = "a title long enough to outgrow the narrowest tab";
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            view.settings.shared =
+                settings.map(|text| crate::herdr_settings::Settings::parse_text(text).unwrap());
+            view.config.tabs.size = font_size;
             let mut snapshot: herdr_client::protocol::ClientShellSnapshot = serde_json::from_str(
                 include_str!("../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"),
             )
@@ -831,7 +990,29 @@ mod tests {
         let near = |a: Pixels, b: Pixels| (a - b).abs() <= px(0.5);
         let tab = cx.debug_bounds("tab-w1:t1").unwrap();
         let dot = cx.debug_bounds("tab-status-w1:t1").unwrap();
-        assert_eq!(dot.size, size(px(STATUS_WIDTH), px(STATUS_WIDTH)));
+        let (width, measured) = cx.update(|window, cx| {
+            let view = view.read(cx);
+            let indicators = Indicators::new(
+                view.settings.shared.as_ref(),
+                matches!(
+                    cx.window_appearance(),
+                    WindowAppearance::Light | WindowAppearance::VibrantLight
+                ),
+                &view.theme,
+            );
+            (
+                indicators.width(&view.config.tabs),
+                view.tab_width(&label.into(), Lead::Status, false, indicators, window),
+            )
+        });
+        assert_eq!(dot.size.width, px(width));
+        if settings.is_none() {
+            assert_eq!(dot.size, size(px(STATUS_WIDTH), px(STATUS_WIDTH)));
+        }
+        assert!(
+            near(tab.size.width, px(measured)),
+            "{tab:?} measured {measured}"
+        );
         assert!(near(dot.left(), tab.left() + px(12.)), "{dot:?} in {tab:?}");
         assert!(near(dot.center().y, tab.center().y), "{dot:?} in {tab:?}");
 
@@ -840,12 +1021,17 @@ mod tests {
         // The dot and its gap widen the tab by what they take, so the
         // title and close button keep their room.
         assert!(
-            near(
-                tab.size.width - plain.size.width,
-                px(STATUS_WIDTH + DOT_GAP)
-            ),
+            near(tab.size.width - plain.size.width, px(width + DOT_GAP)),
             "{tab:?} beside {plain:?}"
         );
+        let close = cx.debug_bounds("close-tab-w1:t1").unwrap();
+        let plain_close = cx.debug_bounds("close-tab-plain").unwrap();
+        assert!(near(close.center().y, plain_close.center().y));
+        assert!(near(tab.size.height, plain.size.height));
+        assert!(near(
+            tab.right() - close.right(),
+            plain.right() - plain_close.right()
+        ));
     }
 
     /// A window whose focused workspace has far more tabs than fit in
@@ -854,7 +1040,9 @@ mod tests {
         cx: &mut TestAppContext,
         last_focused: bool,
     ) -> (Entity<HerdrWindow>, &mut VisualTestContext) {
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        // Reveal must see the intended viewport on its first frame. Opening
+        // maximized and then resizing preserves the already-revealed offset.
+        let window = cx.open_window(size(px(800.), px(600.)), |window, cx| {
             let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
             let mut snapshot: herdr_client::protocol::ClientShellSnapshot = serde_json::from_str(
                 include_str!("../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"),
@@ -876,7 +1064,8 @@ mod tests {
             view.live.snapshot = Some(Arc::new(snapshot));
             view
         });
-        cx.simulate_resize(size(px(800.), px(600.)));
+        let view = window.root(cx).unwrap();
+        let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
         for _ in 0..2 {
             cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
         }
@@ -1193,5 +1382,125 @@ mod tests {
         let carried = cx.debug_bounds("tab-w1:t1").unwrap();
         assert!(carried.right() <= right + px(0.5), "{carried:?}");
         cx.simulate_keystrokes("escape");
+    }
+
+    /// A window over `tabs` in one workspace, with Herdr's shared `ui` config.
+    fn shared_tabs<'a>(
+        cx: &'a mut TestAppContext,
+        tabs: &[&str],
+        ui: &str,
+    ) -> (Entity<HerdrWindow>, &'a mut VisualTestContext) {
+        let tabs: Vec<String> = tabs.iter().map(|id| (*id).to_owned()).collect();
+        let shared = crate::herdr_settings::Settings::parse_text(&format!("[ui]\n{ui}")).unwrap();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            let mut snapshot: herdr_client::protocol::ClientShellSnapshot = serde_json::from_str(
+                include_str!("../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"),
+            )
+            .unwrap();
+            let first = snapshot.tabs[0].clone();
+            snapshot.tabs = tabs
+                .iter()
+                .map(|id| {
+                    let mut tab = first.clone();
+                    tab.tab_id = id.clone();
+                    tab.label = format!("tab {id}");
+                    tab.focused = *id == tabs[0];
+                    tab
+                })
+                .collect();
+            snapshot.focused_tab_id = Some(tabs[0].clone());
+            view.live.snapshot = Some(Arc::new(snapshot));
+            view.live.status = crate::state::ConnectionStatus::Connected;
+            view.settings.shared = Some(shared);
+            view
+        });
+        cx.simulate_resize(size(px(1200.), px(600.)));
+        draw(cx);
+        draw(cx);
+        (view, cx)
+    }
+
+    #[gpui::test]
+    fn the_strip_sits_below_the_group_when_herdr_puts_it_at_the_bottom(cx: &mut TestAppContext) {
+        let (_, cx) = shared_tabs(cx, &["a", "b"], "tab_bar_position = 'bottom'");
+        let group = cx.debug_bounds("group").unwrap();
+        let tab = cx.debug_bounds("tab-a").unwrap();
+        let new_tab = cx.debug_bounds("new-tab").unwrap();
+        assert!(
+            (group.bottom() - new_tab.bottom()).abs() <= px(0.5),
+            "{group:?} {new_tab:?}"
+        );
+        assert!(tab.top() > group.top() + px(100.), "{group:?} {tab:?}");
+
+        let (_, cx) = shared_tabs(&mut cx.cx, &["a", "b"], "tab_bar_position = 'top'");
+        let group = cx.debug_bounds("group").unwrap();
+        let tab = cx.debug_bounds("tab-a").unwrap();
+        assert!(
+            (group.top() - tab.top()).abs() <= px(0.5),
+            "{group:?} {tab:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_lone_tab_hides_the_strip_only_when_herdr_asks_and_the_window_is_not_split(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = shared_tabs(cx, &["a"], "hide_tab_bar_when_single_tab = true");
+        assert!(cx.debug_bounds("new-tab").is_none());
+        assert!(cx.debug_bounds("tab-a").is_none());
+        assert!(cx.debug_bounds("group").is_some());
+
+        // A second tab, Herdr's or a page's, brings the strip back.
+        view.update(cx, |view, _| {
+            let mut snapshot = (**view.live.snapshot.as_ref().unwrap()).clone();
+            let mut second = snapshot.tabs[0].clone();
+            second.tab_id = "b".into();
+            second.focused = false;
+            snapshot.tabs.push(second);
+            view.live.snapshot = Some(Arc::new(snapshot));
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("tab-a").is_some());
+        assert!(cx.debug_bounds("tab-b").is_some());
+
+        // Split, every group keeps its strip, even one listing a single tab.
+        let (view, cx) = shared_tabs(&mut cx.cx, &["a"], "hide_tab_bar_when_single_tab = true");
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                let group = view.group_slots()[0].id;
+                view.split_group(group, window, cx);
+            })
+        });
+        draw(cx);
+        assert!(view.read_with(cx, |view, _| view.is_split()));
+        assert!(cx.debug_bounds("new-tab").is_some());
+        assert!(cx.debug_bounds("g1-new-tab").is_some());
+
+        // Without the setting, a lone tab keeps its strip.
+        let (_, cx) = shared_tabs(&mut cx.cx, &["a"], "");
+        assert!(cx.debug_bounds("tab-a").is_some());
+    }
+
+    #[gpui::test]
+    fn a_bottom_strip_still_reorders_by_dragging(cx: &mut TestAppContext) {
+        let (view, cx) = shared_tabs(
+            cx,
+            &["a", "b", "c"],
+            "tab_bar_position = 'bottom'\nhide_tab_bar_when_single_tab = true",
+        );
+        view.update(cx, |view, _| view.live.supports_tab_move = true);
+        let a = cx.debug_bounds("tab-a").unwrap();
+        let b = cx.debug_bounds("tab-b").unwrap();
+        cx.simulate_mouse_down(a.center(), MouseButton::Left, Modifiers::default());
+        let over = point(a.center().x + b.size.width / 2. + px(4.), a.center().y);
+        for _ in 0..2 {
+            cx.simulate_mouse_move(over, MouseButton::Left, Modifiers::default());
+            draw(cx);
+        }
+        assert_eq!(target(&view, cx), Some((2, "before c".into())));
+        cx.simulate_mouse_up(over, MouseButton::Left, Modifiers::default());
+        draw(cx);
+        view.read_with(cx, |view, _| assert!(view.tab_drag.is_none()));
     }
 }

@@ -2,21 +2,57 @@
 //! the latest projection only: it never queries the daemon, touches disk, or
 //! starts a process.
 
-use super::HerdrWindow;
+use super::{HerdrWindow, PressedLink};
 use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
     ShowUpdatePreview,
-    actions::ShowToastPreview,
+    actions::{RingBellPreview, ShowToastPreview},
     browser::{Pick, Shown, Slot},
     config::ClipboardToastPosition,
     fonts::StyledFont,
     state::ConnectionStatus,
     terminal::*,
+    terminal_painter::{self, ImageTarget, PlacedImages},
     worktree_banner,
 };
 use gpui::{prelude::*, *};
 use herdr_client::ConnectOptions;
 use std::time::Duration;
+
+/// The status bar's 24-unit SVG icons pad their artwork, so they are drawn at
+/// this size to look as large as the 12px ring of the report-issue button.
+const STATUS_GLYPH: f32 = 16.;
+
+impl HerdrWindow {
+    /// Config warnings, then the daemon's announcement, stacked over the
+    /// top-right of the terminal area below the tab strip, whose buttons stay
+    /// reachable. A menu page owns the window's attention; they wait behind it.
+    fn render_notices(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.menu.page.is_some() {
+            return None;
+        }
+        let mut cards = self.config_diagnostic_cards(cx);
+        cards.extend(self.announcement_card(cx));
+        if cards.is_empty() {
+            return None;
+        }
+        // Spans the terminal area so a narrow window shrinks the cards rather
+        // than pushing them off the left edge.
+        Some(
+            div()
+                .absolute()
+                .top(px(self.tab_strip_height() + 8.))
+                .left(px(8.))
+                .right(px(8.))
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(8.))
+                .children(cards)
+                .into_any_element(),
+        )
+    }
+}
 
 impl Render for HerdrWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -33,19 +69,18 @@ impl Render for HerdrWindow {
         self.cell_width = self.painter.borrow_mut().cell_width(&font, window, cx);
         // Registers the window for surface-only redraws; see `redraw_terminal`.
         self.surface_signal.read(cx);
-        let sidebar = self.sidebar_visible.then(|| {
-            crate::sidebar::cached_view(
-                &self.sidebar_view,
-                self.sidebar_width,
-                f32::from(window.viewport_size().width),
-            )
-        });
+        let sidebar = self
+            .sidebar_mode()
+            .width(self.sidebar_width, f32::from(window.viewport_size().width))
+            .map(|width| crate::sidebar::cached_view(&self.sidebar_view, width));
         // Paints the frame on screen, which during a focus change is the one
         // presented before it: the terminal area never blanks between two
         // projections. What the client knows to be current stays in `live`.
-        let surface = self.presentation.frame(&self.live);
+        let picture = self.presentation.picture(&self.live);
+        let surface = picture.as_ref().map(|picture| picture.frame.clone());
+        let images = picture.as_ref().map(|picture| picture.images.clone());
         // A group picking the tab another shows paints this same frame.
-        let window_frame = surface.clone();
+        let window_frame = picture;
         let entity = cx.entity();
         let paint_entity = entity.clone();
         let focus = self.focus.clone();
@@ -55,6 +90,25 @@ impl Render for HerdrWindow {
         // The highlight is grid coordinates, so it paints with the frame that
         // owns the cells rather than being recomputed from the pointer here.
         let selection = self.selection.clone();
+        // Like the highlight, the link underline paints with the frame that
+        // owns its cells, and only while that frame shows the content the
+        // daemon resolved it from.
+        let link_rows: Vec<_> = surface
+            .as_deref()
+            .zip(self.hovered_daemon_link())
+            .filter(|(surface, link)| link.cell.current(surface))
+            .map(|(_, link)| link.frame_rows().collect())
+            .unwrap_or_default();
+        // Search matches, mapped onto the frame on screen. A popup covers the
+        // panes, so their matches stay under it.
+        let matches = surface
+            .as_deref()
+            .map(|surface| {
+                let mut highlights = self.find_highlights(surface);
+                highlights.extend(self.copy_mode_highlights(surface));
+                highlights
+            })
+            .unwrap_or_default();
         // The IME composition paints inline at the input cursor; a menu's
         // text field shows its own.
         // It anchors to the live surface, as the IME's candidate window does,
@@ -66,7 +120,7 @@ impl Render for HerdrWindow {
         self.split_cursor = self.split_cursor_at(window.mouse_position());
         // Pad the terminal itself: the canvas bounds that painting, hit testing,
         // and IME placement all read then already exclude the gap.
-        let sidebar_gap = if self.sidebar_visible {
+        let sidebar_gap = if sidebar.is_some() {
             self.config.layout.sidebar_gap
         } else {
             0.
@@ -91,6 +145,8 @@ impl Render for HerdrWindow {
             })
             .map(|(slot, _)| *slot);
         let terminal_gap = terminal_slot.map_or(sidebar_gap, slot_gap);
+        let find_bar = self.render_find_bar(surface.as_deref(), terminal_gap, cx);
+        let copy_badge = self.render_copy_mode_badge(surface.as_deref(), terminal_gap);
         let terminal = div()
             .id("terminal")
             .debug_selector(|| "terminal".into())
@@ -121,6 +177,7 @@ impl Render for HerdrWindow {
             // application changes what a click does, so the pointer follows.
             .on_modifiers_changed(
                 cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    this.hover_link(window.mouse_position(), event.modifiers, cx);
                     let hovered =
                         this.terminal_link_hovered(window.mouse_position(), event.modifiers);
                     if hovered != this.hovered_terminal_link {
@@ -138,9 +195,16 @@ impl Render for HerdrWindow {
             .bg(rgb(self.theme.background))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(Self::key_up))
             // A selection is copied when it is released, so the terminal has
-            // nothing for Cut, Copy, or Select All to act on.
+            // nothing for Cut or Select All to act on, and Copy only while
+            // Herdr's `copy_on_select` is off and a released selection waits.
             .on_action(cx.listener(|this, _: &crate::actions::Paste, _, cx| this.paste(cx)))
+            .when(self.selection_retained(), |terminal| {
+                terminal.on_action(cx.listener(|this, _: &crate::actions::Copy, _, cx| {
+                    this.copy_retained_selection(cx);
+                }))
+            })
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_drop(cx.listener(Self::drop_terminal_files))
             .on_mouse_down(
@@ -169,9 +233,7 @@ impl Render for HerdrWindow {
                     {
                         return;
                     }
-                    this.pressed_terminal_link = this
-                        .terminal_link_at(event.position)
-                        .map(|url| (url, event.position));
+                    this.pressed_terminal_link = this.terminal_link_press(event.position);
                     if this.menu.page.is_some() {
                         return;
                     }
@@ -226,6 +288,9 @@ impl Render for HerdrWindow {
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 entity.update(cx, |this, cx| {
+                                    // Window-wide, so leaving the terminal
+                                    // drops the underline too.
+                                    this.hover_link(event.position, event.modifiers, cx);
                                     if this.scrollbar_mouse_move(event, cx)
                                         || this.split_mouse_move(event, cx)
                                         || this.terminal_mouse_move(event, cx)
@@ -234,7 +299,7 @@ impl Render for HerdrWindow {
                                         return;
                                     }
                                     if this.pressed_terminal_link.as_ref().is_some_and(
-                                        |(_, position)| {
+                                        |PressedLink { position, .. }| {
                                             (event.position.x - position.x).abs() > px(4.)
                                                 || (event.position.y - position.y).abs() > px(4.)
                                         },
@@ -286,20 +351,29 @@ impl Render for HerdrWindow {
                         if let Some(surface) = &surface {
                             // The highlight belongs to the frame that owns the
                             // cells, so only one of the two paints it.
-                            let highlight = |owned: bool| {
+                            let highlight = |owned: bool| -> Vec<_> {
                                 selection
                                     .as_ref()
                                     .filter(|_| owned)
-                                    .map(|selection| {
-                                        selection.rows(surface, cell_width, cell_height).collect()
+                                    .into_iter()
+                                    .flat_map(|selection| {
+                                        selection.rows(surface, cell_width, cell_height)
                                     })
-                                    .unwrap_or_default()
+                                    .map(|(row, columns)| terminal_painter::Highlight {
+                                        row,
+                                        columns,
+                                        tint: terminal_painter::Tint::Selection,
+                                    })
+                                    .collect()
                             };
-                            let panes: Vec<_> = highlight(
+                            // Matches tint below the selection, which reads
+                            // as chosen over them.
+                            let mut panes = matches;
+                            panes.extend(highlight(
                                 selection
                                     .as_ref()
                                     .is_some_and(|selection| selection.in_panes()),
-                            );
+                            ));
                             painter.borrow_mut().paint_frame(
                                 &surface.frame,
                                 bounds.origin,
@@ -308,8 +382,20 @@ impl Render for HerdrWindow {
                                 &font,
                                 &panes,
                                 &surface.panes,
+                                images.as_deref().map(|images| PlacedImages {
+                                    placements: &surface.graphics.placements,
+                                    images,
+                                    target: ImageTarget::Main,
+                                }),
                                 window,
                                 cx,
+                            );
+                            painter.borrow().paint_link(
+                                &surface.frame,
+                                bounds.origin,
+                                cell_width,
+                                &link_rows,
+                                window,
                             );
                             if let Some(popup) = &surface.popup {
                                 let offset = popup_origin(
@@ -318,10 +404,9 @@ impl Render for HerdrWindow {
                                     cell_width,
                                     cell_height,
                                 );
-                                let rows: Vec<_> =
-                                    highlight(selection.as_ref().is_some_and(|selection| {
-                                        selection.in_popup(&popup.terminal_id)
-                                    }));
+                                let rows = highlight(selection.as_ref().is_some_and(|selection| {
+                                    selection.in_popup(&popup.terminal_id)
+                                }));
                                 painter.borrow_mut().paint_frame(
                                     &popup.frame,
                                     bounds.origin + offset,
@@ -330,6 +415,11 @@ impl Render for HerdrWindow {
                                     &font,
                                     &rows,
                                     &[],
+                                    images.as_deref().map(|images| PlacedImages {
+                                        placements: &surface.graphics.placements,
+                                        images,
+                                        target: ImageTarget::Popup(&popup.terminal_id),
+                                    }),
                                     window,
                                     cx,
                                 );
@@ -350,6 +440,8 @@ impl Render for HerdrWindow {
                 )
                 .size_full(),
             )
+            .when_some(find_bar, |terminal, bar| terminal.child(bar))
+            .when_some(copy_badge, |terminal, badge| terminal.child(badge))
             // Direct feedback for the user's own gesture, not a daemon notice:
             // it sits over the cells it copied and needs no dismissing.
             .when_some(self.flash.as_ref(), |terminal, (flash, _)| {
@@ -496,8 +588,16 @@ impl Render for HerdrWindow {
             .on_action(cx.listener(|this, action: &ShowToastPreview, _, cx| {
                 this.show_toast_preview(action.kind, cx);
             }))
+            .on_action(cx.listener(
+                |this, _: &crate::actions::ShowSystemNotificationPreview, window, cx| {
+                    this.show_system_notification_preview(window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, _: &PlaySound, _, _| {
                 this.sound.preview();
+            }))
+            .on_action(cx.listener(|this, _: &RingBellPreview, window, cx| {
+                this.preview_bell(window, cx);
             }))
             .size_full()
             .relative()
@@ -527,7 +627,9 @@ impl Render for HerdrWindow {
                              .flex_1()
                              .min_w_0()
                              .min_h_0()
+                            .relative()
                             .child(content)
+                            .children(self.render_notices(cx))
                             .child(
                 div()
                     .id("connection-status")
@@ -544,7 +646,7 @@ impl Render for HerdrWindow {
                     .children(self.render_usage(cx))
                     .when_some(
                         self.prefix_armed
-                            .then(|| self.config.keybindings.prefix_label())
+                            .then(|| self.keymap().prefix_label())
                             .flatten(),
                         |bar, prefix| bar.child(
                             div()
@@ -556,6 +658,21 @@ impl Render for HerdrWindow {
                                 .child(prefix),
                         ),
                     )
+                    // The mode has no control on screen, so it says how it works.
+                    .when(self.resize_mode, |bar| bar.child(
+                        div()
+                            .debug_selector(|| "resize-mode".into())
+                            .flex_none()
+                            .px(px(6.))
+                            .rounded(px(crate::config::corners::SMALL))
+                            .bg(rgb(self.theme.active))
+                            .child("Resize"),
+                    ).child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(self.theme.muted))
+                            .child("h j k l or arrows resize, Esc ends"),
+                    ))
                     .when(!self.live.status.is_connected(), |bar| bar.child(
                         if matches!(self.live.status, ConnectionStatus::StartingDaemon) {
                             div()
@@ -592,6 +709,58 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .children(self.render_system_load())
+                    .when(crate::caffeine::SUPPORTED, |bar| {
+                        let awake = crate::caffeine::active(cx);
+                        let (foreground, surface) = (self.theme.foreground, self.theme.surface);
+                        bar.child(
+                            div()
+                                .id("status-caffeine")
+                                .debug_selector(|| "status-caffeine".into())
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .px_2()
+                                .h_full()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(self.theme.active)))
+                                .child(
+                                    svg()
+                                        .path(if awake {
+                                            "icons/coffee-full.svg"
+                                        } else {
+                                            "icons/coffee.svg"
+                                        })
+                                        .size(px(STATUS_GLYPH))
+                                        .flex_none()
+                                        .text_color(rgb(if awake {
+                                            self.theme.primary()
+                                        } else {
+                                            self.theme.foreground
+                                        })),
+                                )
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| crate::usage::Hint {
+                                        text: if awake {
+                                            "Keeping the display awake".into()
+                                        } else {
+                                            "Keep the display awake".into()
+                                        },
+                                        foreground,
+                                        surface,
+                                    })
+                                    .into()
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Err(error) = crate::caffeine::toggle(cx) {
+                                        this.show_flash(
+                                            super::Flash::warning(error.to_string()),
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                    })
                     .child(
                         div()
                                     .id("status-theme")
@@ -607,7 +776,7 @@ impl Render for HerdrWindow {
                             .child(
                                 svg()
                                     .path("icons/theme.svg")
-                                    .size(px(12.))
+                                    .size(px(STATUS_GLYPH))
                                     .flex_none()
                                     .text_color(rgb(self.theme.foreground)),
                             )
@@ -631,7 +800,7 @@ impl Render for HerdrWindow {
                             .child(
                                 svg()
                                     .path("icons/keyboard.svg")
-                                    .size(px(12.))
+                                    .size(px(STATUS_GLYPH))
                                     .flex_none()
                                     .text_color(rgb(self.theme.foreground)),
                             )

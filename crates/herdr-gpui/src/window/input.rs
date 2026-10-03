@@ -7,7 +7,7 @@ use crate::{
     connection::ConnectionBridge,
     terminal::{WheelAccumulator, key_input, wheel_target},
 };
-use gpui::{Context, KeyDownEvent, ScrollWheelEvent, Window};
+use gpui::{Context, KeyDownEvent, KeyUpEvent, ScrollWheelEvent, Window};
 
 impl HerdrWindow {
     pub(crate) fn open_terminal_link(
@@ -27,20 +27,13 @@ impl HerdrWindow {
         {
             return;
         }
-        if let Some(url) = self.terminal_link_at(event.up.position)
-            && pressed
-                .as_ref()
-                .is_some_and(|(destination, _)| destination == &url)
-        {
+        let Some(pressed) = pressed else {
+            return;
+        };
+        let in_tab = (self.config.open_links_in == crate::config::LinkTarget::BrowserTab)
+            != event.down.modifiers.alt;
+        if self.activate_terminal_link(&pressed, event.up.position, in_tab, window, cx) {
             cx.stop_propagation();
-            let in_tab = (self.config.open_links_in == crate::config::LinkTarget::BrowserTab)
-                != event.down.modifiers.alt;
-            match crate::browser::WebUrl::try_from(url.as_str()) {
-                Ok(url) if in_tab && crate::browser::EMBEDDED => {
-                    self.open_browser_tab(Some(url), window, cx);
-                }
-                _ => cx.open_url(&url),
-            }
         }
     }
 
@@ -53,7 +46,10 @@ impl HerdrWindow {
         position: gpui::Point<gpui::Pixels>,
         modifiers: gpui::Modifiers,
     ) -> bool {
-        modifiers.shift || (modifiers.secondary() && self.terminal_link_at(position).is_some())
+        modifiers.shift
+            || (modifiers.secondary()
+                && (self.terminal_link_at(position).is_some()
+                    || self.daemon_link_at(position).is_some()))
     }
 
     /// Whether a left click here would open a link, which the pointer shows.
@@ -62,7 +58,7 @@ impl HerdrWindow {
         position: gpui::Point<gpui::Pixels>,
         modifiers: gpui::Modifiers,
     ) -> bool {
-        self.terminal_link_at(position).is_some()
+        (self.terminal_link_at(position).is_some() || self.daemon_link_at(position).is_some())
             && (modifiers.secondary()
                 || modifiers.shift
                 || self
@@ -124,6 +120,9 @@ impl HerdrWindow {
 
     /// Cmd-V and Edit > Paste into the focused pane or popup.
     pub(crate) fn paste(&mut self, cx: &mut Context<Self>) {
+        if self.copy_mode_active() {
+            return;
+        }
         // GPUI has no text-only Linux clipboard API. Preserve its native
         // ordinary paste (which needs no helper executable); explicit Ctrl-V
         // image acquisition still uses the bounded background reader.
@@ -140,6 +139,23 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A new press goes wherever this decides; only the pane branch at the
+        // end holds it again for its release.
+        self.held_keys.forget(&event.keystroke.key);
+        // A keystroke bubbling out of the find field is the field's: an
+        // unhandled one is still on its way to the field's IME.
+        if self.find_focused(window, cx) {
+            return;
+        }
+        // Copy mode owns the keyboard: its keys run and nothing else is typed.
+        if self.copy_mode_active() {
+            self.copy_mode_key(event, cx);
+            if !event.keystroke.modifiers.platform {
+                cx.stop_propagation();
+                window.prevent_default();
+            }
+            return;
+        }
         #[cfg(feature = "integration-test")]
         {
             self.input_probe.keys += 1;
@@ -148,6 +164,20 @@ impl HerdrWindow {
             .config
             .option_as_alt
             .sends_alt(cx.keyboard_layout().id());
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key.eq_ignore_ascii_case("c")
+            && (modifiers.platform != modifiers.control)
+            && !modifiers.alt
+            && !modifiers.shift
+            && self.copy_retained_selection(cx)
+        {
+            // Herdr's retained-selection copy: Ctrl-C copies instead of
+            // interrupting the pane while a kept selection is showing.
+            cx.stop_propagation();
+            window.prevent_default();
+            return;
+        }
+        self.clear_retained_selection(cx);
         if event.keystroke.key == "escape"
             && (self.cancel_workspace_drag(cx) | self.cancel_tab_drag(cx))
         {
@@ -170,9 +200,26 @@ impl HerdrWindow {
         } else if self.marked.is_empty()
             && let Some(input) = key_input(event, alt_keys)
         {
+            let input =
+                self.held_keys
+                    .press(&event.keystroke.key, input, self.live.keyboard_report_all);
             self.send(input, cx);
             cx.stop_propagation();
             window.prevent_default();
+        }
+    }
+
+    /// Releases a key the pane received while Herdr reported that its focused
+    /// pane wants every key event, as the TUI does by switching its outer
+    /// terminal to report all keys. Text stays with the input handler, so
+    /// only keys sent as key events are released.
+    pub(crate) fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(release) = self.held_keys.release(&event.keystroke.key) else {
+            return;
+        };
+        if self.live.keyboard_report_all && self.marked.is_empty() {
+            self.send(release, cx);
+            cx.stop_propagation();
         }
     }
 }

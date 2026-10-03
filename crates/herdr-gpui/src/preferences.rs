@@ -3,7 +3,6 @@ use crate::{
     config::{Config, FONT_SIZE_RANGE, Features, FontFace},
     contrast::Contrast,
     font_picker::{FontTarget, shared_family},
-    fonts::StyledFont,
     search_input::SearchInput,
 };
 use gpui::{prelude::*, *};
@@ -82,25 +81,59 @@ impl HerdrWindow {
 
     /// Write one setting off the UI thread, then reload so the window shows
     /// what the file now says rather than what was clicked.
-    fn save_preference(
+    pub(crate) fn save_preference(
         &mut self,
         save: impl FnOnce() -> crate::Result<()> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
+        if self.native_settings_save_in_flight() || self.theme_save_in_flight() {
+            return;
+        }
+        if self.config_load.is_some() || self.font_size_saves.is_busy() {
+            // A combined write and reload would be refused here, discarding
+            // the click. The config lock serializes the write with other
+            // saves, and the config watcher reloads once the busy load ends.
+            self.write_preference(save, cx);
+            return;
+        }
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
                 save()?;
                 let mut config = Config::load()?;
                 config.resolve_font_fallbacks(|| text_system.all_font_names());
-                let theme = config.theme()?;
+                let theme = if config.theme == "Follow Herdr" {
+                    Default::default()
+                } else {
+                    config.theme()?
+                };
                 Ok((config, theme))
             },
             cx,
         );
     }
 
-    pub(super) fn render_preferences(&self, cx: &mut Context<Self>) -> Div {
+    fn write_preference(
+        &mut self,
+        save: impl FnOnce() -> crate::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = cx.background_executor().spawn(async move { save() });
+        cx.spawn(async move |this, cx| {
+            let result = saved.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => this.load_gui_config(cx),
+                Err(error) => {
+                    tracing::warn!(%error, "Could not save GUI preference");
+                    this.local_error = Some(format!("Save GUI config: {error}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn render_native_preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = &self.theme;
         let font = &self.config.ui;
         let accent = crate::menu::accent(theme);
@@ -193,13 +226,9 @@ impl HerdrWindow {
                 }),
             )
             .px(px(16.))
-            .py(px(8.))
-            .child(section("APPEARANCE"))
-            .child(row(
-                "preferences-show-agents",
-                "Show agents",
-                self.config.show_agents.to_string(),
-            ))
+            .py(px(8.));
+        if self.settings.tab == crate::settings_panel::Tab::General {
+            body = body.child(section("GENERAL"))
             .child(
                 toggle(
                     "preferences-show-usage",
@@ -210,6 +239,25 @@ impl HerdrWindow {
                     cx.stop_propagation();
                     let show = !this.config.usage.show;
                     this.save_preference(move || Config::save_usage_visibility(show), cx);
+                })),
+            )
+            .child(
+                toggle(
+                    "preferences-show-system-load",
+                    "Show CPU and memory",
+                    self.config.show_system_load,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.show_system_load;
+                    this.save_preference(
+                        move || {
+                            Config::save_preference(
+                                crate::config::preferences::Preference::ShowSystemLoad(show),
+                            )
+                        },
+                        cx,
+                    );
                 })),
             )
             .child(
@@ -242,100 +290,13 @@ impl HerdrWindow {
                 "Sidebar gap",
                 format!("{} px", self.config.layout.sidebar_gap),
             ))
-            .child(row("preferences-theme", "Theme", self.config.theme.clone()))
-            .child(div().py(px(10.)).child(
-                button("preferences-choose-theme", "Choose theme").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_theme_picker(window, cx);
-                    },
-                )),
-            ))
-            .child(section("FONTS"));
-        body = body.child(
-            div()
-                .debug_selector(|| "preferences-font-all".into())
-                .flex()
-                .items_center()
-                .min_w_0()
-                .gap(px(12.))
-                .py(px(7.))
-                .border_b_1()
-                .border_color(rgb(theme.active))
-                .child(
-                    div()
-                        .w(relative(0.3))
-                        .flex_none()
-                        .text_color(rgb(theme.muted))
-                        .child("All fonts"),
-                )
-                .child(
-                    div()
-                        .id("preferences-font-all-choose")
-                        .debug_selector(|| "preferences-font-all-choose".into())
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_right()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(theme.active)))
-                        .child(format!(
-                            "{} ▾",
-                            shared_family(&self.config).unwrap_or("Mixed")
-                        ))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.open_font_picker(FontTarget::All, window, cx);
-                        })),
-                ),
-        );
-        for (face, id, label, value) in [
-            (
-                FontFace::Sidebar,
-                "preferences-font-sidebar",
-                "Sidebar",
-                &self.config.sidebar,
-            ),
-            (
-                FontFace::Tabs,
-                "preferences-font-tabs",
-                "Tabs",
-                &self.config.tabs,
-            ),
-            (
-                FontFace::Terminal,
-                "preferences-font-terminal",
-                "Terminal",
-                &self.config.terminal,
-            ),
-            (FontFace::Ui, "preferences-font-ui", "UI", &self.config.ui),
-        ] {
-            let control =
-                |suffix: &'static str, symbol: &'static str, direction: f32, enabled: bool| {
-                    div()
-                        .id(format!("{id}-{suffix}"))
-                        .debug_selector(move || format!("{id}-{suffix}"))
-                        .px(px(8.))
-                        .py(px(3.))
-                        .rounded(px(crate::config::corners::CONTROL))
-                        .border_1()
-                        .border_color(rgb(theme.active))
-                        .bg(rgb(theme.background))
-                        .when(enabled, |button| {
-                            button
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(theme.active)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.change_font_size(face, direction, cx);
-                                }))
-                        })
-                        .when(!enabled, |button| button.text_color(rgb(theme.muted)))
-                        .child(symbol)
-                };
+            .child(note("Edit [layout] mode and sidebar_gap (0-64 logical pixels) in the local override file below; saved changes reload automatically."));
+        }
+        if self.settings.tab == crate::settings_panel::Tab::Font {
+            body = body.child(section("FONTS"));
             body = body.child(
                 div()
-                    .debug_selector(move || id.into())
+                    .debug_selector(|| "preferences-font-all".into())
                     .flex()
                     .items_center()
                     .min_w_0()
@@ -347,74 +308,150 @@ impl HerdrWindow {
                         div()
                             .w(relative(0.3))
                             .flex_none()
-                            .min_w_0()
                             .text_color(rgb(theme.muted))
-                            .child(label),
+                            .child("All fonts"),
                     )
                     .child(
                         div()
-                            .id(format!("{id}-choose"))
-                            .debug_selector(move || format!("{id}-choose"))
+                            .id("preferences-font-all-choose")
+                            .debug_selector(|| "preferences-font-all-choose".into())
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_right()
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(theme.active)))
-                            .child(format!("{} ▾", value.family))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .child(format!(
+                                "{} ▾",
+                                shared_family(&self.config).unwrap_or("Mixed")
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.open_font_picker(FontTarget::Face(face), window, cx);
+                                this.open_font_picker(FontTarget::All, window, cx);
                             })),
-                    )
-                    .child(control(
-                        "decrease",
-                        "−",
-                        -1.,
-                        value.size > *FONT_SIZE_RANGE.start(),
-                    ))
-                    .child(
-                        if let Some(editor) = &self.menu.font_size_editor
-                            && editor.face == face
-                        {
+                    ),
+            );
+            for (face, id, label, value) in [
+                (
+                    FontFace::Sidebar,
+                    "preferences-font-sidebar",
+                    "Sidebar",
+                    &self.config.sidebar,
+                ),
+                (
+                    FontFace::Tabs,
+                    "preferences-font-tabs",
+                    "Tabs",
+                    &self.config.tabs,
+                ),
+                (
+                    FontFace::Terminal,
+                    "preferences-font-terminal",
+                    "Terminal",
+                    &self.config.terminal,
+                ),
+                (FontFace::Ui, "preferences-font-ui", "UI", &self.config.ui),
+            ] {
+                let control =
+                    |suffix: &'static str, symbol: &'static str, direction: f32, enabled: bool| {
+                        div()
+                            .id(format!("{id}-{suffix}"))
+                            .debug_selector(move || format!("{id}-{suffix}"))
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(px(crate::config::corners::CONTROL))
+                            .border_1()
+                            .border_color(rgb(theme.active))
+                            .bg(rgb(theme.background))
+                            .when(enabled, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(theme.active)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.change_font_size(face, direction, cx);
+                                    }))
+                            })
+                            .when(!enabled, |button| button.text_color(rgb(theme.muted)))
+                            .child(symbol)
+                    };
+                body = body.child(
+                    div()
+                        .debug_selector(move || id.into())
+                        .flex()
+                        .items_center()
+                        .min_w_0()
+                        .gap(px(12.))
+                        .py(px(7.))
+                        .border_b_1()
+                        .border_color(rgb(theme.active))
+                        .child(
                             div()
-                                .w(px(55.))
+                                .w(relative(0.3))
                                 .flex_none()
-                                .child(editor.input.clone())
-                                .into_any_element()
-                        } else {
+                                .min_w_0()
+                                .text_color(rgb(theme.muted))
+                                .child(label),
+                        )
+                        .child(
                             div()
-                                .id(format!("{id}-size"))
-                                .debug_selector(move || format!("{id}-size"))
-                                .flex_none()
+                                .id(format!("{id}-choose"))
+                                .debug_selector(move || format!("{id}-choose"))
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_right()
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(theme.active)))
-                                .child(format!("{} px", value.size))
+                                .child(format!("{} ▾", value.family))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    this.begin_font_size_edit(face, window, cx);
-                                }))
-                                .into_any_element()
-                        },
-                    )
-                    .child(control(
-                        "increase",
-                        "+",
-                        1.,
-                        value.size < *FONT_SIZE_RANGE.end(),
-                    )),
-            );
-        }
-        body = body
-            .child(section("NOTIFICATIONS"))
-            .child(row("preferences-notifications-enabled", "In-app toasts", self.config.notifications.enabled.to_string()))
-            .child(row("preferences-notifications-delay", "Delay (seconds)", self.config.notifications.delay_seconds.to_string()))
-            .child(row("preferences-notifications-position", "Corner", format!("{:?}", self.config.notifications.position)))
-            .child(note("Edit [notifications] in the local GUI config file; saved changes reload automatically. In-app notifications default off; QA previews always work. No sounds or OS notifications."))
-            .child(note(
+                                    this.open_font_picker(FontTarget::Face(face), window, cx);
+                                })),
+                        )
+                        .child(control(
+                            "decrease",
+                            "−",
+                            -1.,
+                            value.size > *FONT_SIZE_RANGE.start(),
+                        ))
+                        .child(
+                            if let Some(editor) = &self.menu.font_size_editor
+                                && editor.face == face
+                            {
+                                div()
+                                    .w(px(55.))
+                                    .flex_none()
+                                    .child(editor.input.clone())
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id(format!("{id}-size"))
+                                    .debug_selector(move || format!("{id}-size"))
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(theme.active)))
+                                    .child(format!("{} px", value.size))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.begin_font_size_edit(face, window, cx);
+                                    }))
+                                    .into_any_element()
+                            },
+                        )
+                        .child(control(
+                            "increase",
+                            "+",
+                            1.,
+                            value.size < *FONT_SIZE_RANGE.end(),
+                        )),
+                );
+            }
+            return body.child(note(
                 "Font families and sizes save to local GUI overrides and reload in every window. Click a size to type 8–48; Enter or leaving the field saves, Escape cancels. Sizes are logical pixels.",
-            ))
-            .child(section("FEATURES"));
+            ));
+        }
+        body = body.child(section("FEATURES"));
         for (id, label, enabled) in feature_rows(&self.config.features) {
             body = body.child(row(id, label, if enabled { "On" } else { "Off" }.into()));
         }
@@ -450,6 +487,22 @@ impl HerdrWindow {
                 "Teaches Claude Code and other agents to show you pages in browser tabs and read the notes you send. Lives in ~/.claude/skills and ~/.agents/skills. Remove deletes only the copies this app wrote.",
             ))
             .child(section("CONFIGURATION"))
+            .child(note("Theme, indicators, sound, and toasts share this computer's Herdr configuration, not a remote daemon's settings."))
+            .child(
+                div()
+                    .debug_selector(|| "preferences-shared-path".into())
+                    .py(px(7.))
+                    .child(
+                        self.settings.shared.as_ref()
+                            .map(|settings| settings.path.display().to_string())
+                            .unwrap_or_else(|| "Shared config path unavailable".into()),
+                    ),
+            )
+            .child(
+                button("preferences-reload-shared", "Reload shared settings")
+                    .when(self.settings.task.is_some(), |button| button.opacity(0.5))
+                    .on_click(cx.listener(|this, _, _, cx| this.load_shared_settings(cx))),
+            )
             .child(
                 div()
                     .text_color(rgb(theme.muted))
@@ -498,89 +551,7 @@ impl HerdrWindow {
                 format!("{:?}", self.endpoints[self.selected_endpoint].connection.target),
             ));
 
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .min_h_0()
-            .min_w_0()
-            .text_font(font)
-            .text_size(px(font.size))
-            .line_height(px(font.line_height()))
-            .text_color(rgb(theme.foreground))
-            .child(
-                div()
-                    .debug_selector(|| "preferences-header".into())
-                    .flex()
-                    .items_center()
-                    .flex_none()
-                    .gap(px(12.))
-                    .p(px(16.))
-                    .border_b_1()
-                    .border_color(rgb(theme.active))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(3.))
-                            .h(px(font.size * 2.5))
-                            .rounded_full()
-                            .bg(accent),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(font.size * 1.35))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Preferences"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(theme.muted))
-                                    .child("Current GUI settings"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("preferences-close")
-                            .debug_selector(|| "preferences-close".into())
-                            .flex_none()
-                            .px(px(8.))
-                            .py(px(4.))
-                            .rounded(px(crate::config::corners::CONTROL))
-                            .cursor_pointer()
-                            .text_color(rgb(theme.muted))
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(theme.active))
-                                    .text_color(rgb(theme.foreground))
-                            })
-                            .child("Close")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.dismiss_menu(window, cx);
-                            })),
-                    ),
-            )
-            .child(body)
-            .child(
-                div()
-                    .debug_selector(|| "preferences-footer".into())
-                    .flex_none()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .border_t_1()
-                    .border_color(rgb(theme.active))
-                    .text_color(rgb(theme.muted))
-                    .child(
-                        self.font_size_saves
-                            .status()
-                            .unwrap_or("Esc to close  /  click outside to dismiss")
-                            .to_owned(),
-                    ),
-            )
+        body
     }
 }
 
@@ -590,32 +561,24 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// saves without waiting; process exit may interrupt pending writes.
 /// How the agents panel orders its rows, as in the terminal client: grouped
 /// keeps the daemon's workspace order, priority floats the agents that want
-/// attention. Client-local, like the sidebar width beside it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// attention. Herdr's `ui.agent_panel_sort` seeds it until the user toggles
+/// it, which deserializes upstream's spellings ("spaces", alias "workspaces").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 pub enum AgentSort {
     #[default]
+    #[serde(rename = "spaces", alias = "workspaces")]
     Grouped,
+    #[serde(rename = "priority")]
     Priority,
 }
 
 impl std::fmt::Display for AgentSort {
-    /// Also the stored spelling, which `From<&str>` reads back.
+    /// Also the stored spelling, which `AgentSort::parse` reads back.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Grouped => "grouped",
             Self::Priority => "priority",
         })
-    }
-}
-
-/// An unreadable or unknown preference falls back to the default rather than
-/// failing the load, so this is infallible and not `FromStr`.
-impl From<&str> for AgentSort {
-    fn from(value: &str) -> Self {
-        match value {
-            "priority" => Self::Priority,
-            _ => Self::Grouped,
-        }
     }
 }
 
@@ -627,10 +590,14 @@ impl AgentSort {
         }
     }
 
-    fn parse(value: Option<&serde_json::Value>) -> Self {
-        value
-            .and_then(serde_json::Value::as_str)
-            .map_or_else(Self::default, Self::from)
+    /// An unreadable or unknown stored value is no override at all, so the
+    /// daemon's setting applies rather than a guessed sort.
+    fn parse(value: Option<&serde_json::Value>) -> Option<Self> {
+        match value.and_then(serde_json::Value::as_str)? {
+            "grouped" => Some(Self::Grouped),
+            "priority" => Some(Self::Priority),
+            _ => None,
+        }
     }
 }
 
@@ -639,7 +606,9 @@ impl AgentSort {
 pub struct Chrome {
     pub sidebar_width: Option<f32>,
     pub sidebar_split: Option<f32>,
-    pub agent_sort: AgentSort,
+    /// The sort the user picked with the panel toggle, like upstream's
+    /// `agent_panel_sort` preference. `None` follows the daemon's config.
+    pub agent_sort: Option<AgentSort>,
 }
 
 pub struct Preferences {
@@ -774,8 +743,11 @@ fn read_chrome(path: &Path) -> crate::Result<Chrome> {
     let object = value
         .as_object()
         .ok_or(crate::Error::PreferencesNotObject)?;
-    // A file written before the sort existed simply keeps the default.
-    let agent_sort = AgentSort::parse(object.get("agent_sort"));
+    // Earlier builds always wrote `agent_sort`, so its default value cannot be
+    // told from a choice; only "priority" proves the user toggled it.
+    let agent_sort = AgentSort::parse(object.get("agent_sort_manual")).or_else(|| {
+        AgentSort::parse(object.get("agent_sort")).filter(|sort| *sort == AgentSort::Priority)
+    });
     let sidebar_width = match object.get("sidebar_width_px") {
         None | Some(serde_json::Value::Null) => None,
         Some(value) => {
@@ -829,7 +801,7 @@ fn write_chrome(path: &Path, chrome: Chrome) -> crate::Result<()> {
                 "sidebar_split": chrome.sidebar_split.filter(|split| {
                     split.is_finite() && (0.1..=0.9).contains(split)
                 }),
-                "agent_sort": chrome.agent_sort.to_string(),
+                "agent_sort_manual": chrome.agent_sort.map(|sort| sort.to_string()),
             }),
         )?;
         file.write_all(b"\n")?;
@@ -917,7 +889,7 @@ mod tests {
             preferences.save(Chrome {
                 sidebar_width: Some(width as f32),
                 sidebar_split: Some(0.4),
-                agent_sort: AgentSort::Priority,
+                agent_sort: Some(AgentSort::Priority),
             });
         }
         let worker = preferences.worker.take().unwrap();
@@ -930,7 +902,7 @@ mod tests {
             Chrome {
                 sidebar_width: Some(100.0),
                 sidebar_split: Some(0.4),
-                agent_sort: AgentSort::Priority,
+                agent_sort: Some(AgentSort::Priority),
             }
         );
         preferences.save(Chrome::default());
@@ -943,44 +915,60 @@ mod tests {
     }
 
     #[core::prelude::v1::test]
-    fn stored_sorts_and_older_files_both_load() {
+    fn only_a_toggled_sort_is_stored_and_older_files_migrate() {
         let directory = TestDirectory::new();
         let path = endpoint_path(&directory.0, Path::new("/tmp/sort.sock"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // A file from before the sort existed, then an unknown value.
+        let chrome = |agent_sort| Chrome {
+            sidebar_width: Some(240.0),
+            sidebar_split: None,
+            agent_sort,
+        };
         for (json, expected) in [
+            // A file from before the sort existed follows the daemon.
+            (r#"{"sidebar_width_px": 240.0}"#, None),
+            // Earlier builds wrote their default whether or not it was chosen,
+            // so only a stored "priority" is known to be a toggle.
             (
-                r#"{"sidebar_width_px": 240.0}"#,
-                Chrome {
-                    sidebar_width: Some(240.0),
-                    sidebar_split: None,
-                    agent_sort: AgentSort::Grouped,
-                },
+                r#"{"sidebar_width_px": 240.0, "agent_sort": "grouped"}"#,
+                None,
             ),
             (
-                r#"{"sidebar_width_px": null, "agent_sort": "sideways"}"#,
-                Chrome::default(),
+                r#"{"sidebar_width_px": 240.0, "agent_sort": "priority"}"#,
+                Some(AgentSort::Priority),
             ),
             (
-                r#"{"sidebar_width_px": 200.0, "agent_sort": "priority"}"#,
-                Chrome {
-                    sidebar_width: Some(200.0),
-                    sidebar_split: None,
-                    agent_sort: AgentSort::Priority,
-                },
+                r#"{"sidebar_width_px": 240.0, "agent_sort": "sideways"}"#,
+                None,
+            ),
+            (
+                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": null}"#,
+                None,
+            ),
+            (
+                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": "grouped"}"#,
+                Some(AgentSort::Grouped),
+            ),
+            (
+                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": "spaces"}"#,
+                None,
+            ),
+            (
+                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": 1}"#,
+                None,
             ),
         ] {
             fs::write(&path, json).unwrap();
-            assert_eq!(read_chrome(&path).unwrap(), expected, "{json}");
+            assert_eq!(read_chrome(&path).unwrap(), chrome(expected), "{json}");
         }
-        // Whatever was read survives a write and read of the same value.
-        let chrome = Chrome {
-            sidebar_width: Some(321.0),
-            sidebar_split: None,
-            agent_sort: AgentSort::Priority,
-        };
-        write_chrome(&path, chrome).unwrap();
-        assert_eq!(read_chrome(&path).unwrap(), chrome);
+        for agent_sort in [None, Some(AgentSort::Grouped), Some(AgentSort::Priority)] {
+            write_chrome(&path, chrome(agent_sort)).unwrap();
+            let stored: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            // The legacy key is no longer written, so it cannot pin a default.
+            assert!(stored.get("agent_sort").is_none(), "{stored}");
+            assert_eq!(read_chrome(&path).unwrap(), chrome(agent_sort));
+        }
     }
 
     #[core::prelude::v1::test]
@@ -1005,12 +993,12 @@ mod tests {
             Chrome {
                 sidebar_width: Some(160.),
                 sidebar_split: None,
-                agent_sort: AgentSort::Grouped,
+                agent_sort: Some(AgentSort::Grouped),
             },
             Chrome {
                 sidebar_width: Some(400.),
                 sidebar_split: Some(0.6),
-                agent_sort: AgentSort::Priority,
+                agent_sort: Some(AgentSort::Priority),
             },
             Chrome::default(),
         ];
@@ -1064,7 +1052,7 @@ mod tests {
                     Chrome {
                         sidebar_width: Some(width),
                         sidebar_split: None,
-                        agent_sort: AgentSort::default(),
+                        agent_sort: None,
                     }
                 )
                 .is_err()
@@ -1073,7 +1061,7 @@ mod tests {
         let chrome = Chrome {
             sidebar_width: Some(237.5),
             sidebar_split: None,
-            agent_sort: AgentSort::default(),
+            agent_sort: None,
         };
         write_chrome(&path, chrome).unwrap();
         assert_eq!(read_chrome(&path).unwrap(), chrome);
@@ -1087,7 +1075,7 @@ mod tests {
         let expected = Chrome {
             sidebar_width: Some(240.0),
             sidebar_split: None,
-            agent_sort: AgentSort::Priority,
+            agent_sort: Some(AgentSort::Priority),
         };
         for split in [
             "null", "0", "-1", "0.099", "0.901", "1e100", "1e-100", "\"0.5\"", "true", "[]", "{}",
@@ -1129,7 +1117,7 @@ mod tests {
             let chrome = Chrome {
                 sidebar_width: Some(240.0),
                 sidebar_split,
-                agent_sort: AgentSort::Priority,
+                agent_sort: Some(AgentSort::Priority),
             };
             write_chrome(&path, chrome).unwrap();
             let stored: serde_json::Value =
@@ -1154,5 +1142,41 @@ mod tests {
             endpoint_path(root, Path::new("/a.sock")),
             endpoint_path(root, Path::new("/b.sock"))
         );
+    }
+}
+
+// A sibling of `tests`: its glob import shadows `#[test]` with GPUI's macro.
+#[cfg(test)]
+mod busy_load_tests {
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn preference_clicked_during_a_config_load_is_still_written(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        view.update(cx, |view, cx| {
+            // A load that never finishes, such as one the watcher started.
+            view.config_load = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+            let written = written.clone();
+            view.save_preference(
+                move || {
+                    written.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        view.update(cx, |view, cx| {
+            view.save_preference(|| Err(crate::Error::InvalidSidebarGap), cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let error = view.local_error.as_deref().unwrap();
+            assert!(error.starts_with("Save GUI config:"), "{error}");
+            // The busy load is left alone; the watcher applies the write.
+            assert!(view.config_load.is_some());
+        });
     }
 }

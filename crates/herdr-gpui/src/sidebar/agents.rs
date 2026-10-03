@@ -6,6 +6,7 @@ use super::{STATUS_DOT_UNKNOWN, STATUS_WIDTH, first_text, label_text, line_heigh
 use crate::{
     HerdrWindow,
     config::{FontConfig, Theme},
+    herdr_settings::{IndicatorStyle, Settings},
 };
 use gpui::{prelude::*, *};
 use herdr_client::protocol::{AgentStatus, ClientShellAgent, ClientShellSnapshot};
@@ -53,11 +54,30 @@ pub(super) fn status_priority(status: AgentStatus) -> u8 {
 }
 
 /// The agents of one endpoint in the order the panel paints them.
+///
+/// A plugin's agent view (`agent.view.set`) is authoritative while the daemon
+/// names it: the panel shows exactly the panes in `agent_order`, in that
+/// order, so agents its filter excluded stay hidden and an empty order means
+/// none match. Upstream's client keys this on the label, not on the order
+/// being non-empty, and drops ids the snapshot has no agent for. Without a
+/// view the local sort applies.
 pub(super) fn sorted_agents(
-    agents: &[ClientShellAgent],
+    snapshot: &ClientShellSnapshot,
     sort: crate::preferences::AgentSort,
 ) -> Vec<&ClientShellAgent> {
-    let mut ordered: Vec<_> = agents.iter().collect();
+    if snapshot.agent_view_label.is_some() {
+        return snapshot
+            .agent_order
+            .iter()
+            .filter_map(|pane_id| {
+                snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == *pane_id)
+            })
+            .collect();
+    }
+    let mut ordered: Vec<_> = snapshot.agents.iter().collect();
     if sort == crate::preferences::AgentSort::Priority {
         ordered.sort_by_key(|agent| {
             (
@@ -71,15 +91,16 @@ pub(super) fn sorted_agents(
 
 /// What an agent is called wherever it is listed.
 pub(crate) fn agent_name(agent: &ClientShellAgent) -> &str {
-    first_text(
-        [
-            agent.display_agent.as_deref(),
-            agent.name.as_deref(),
-            agent.agent.as_deref(),
-            agent.title.as_deref(),
-        ],
-        "agent",
-    )
+    first_text(agent_names(agent), "agent")
+}
+
+pub(super) fn agent_names(agent: &ClientShellAgent) -> [Option<&str>; 4] {
+    [
+        agent.display_agent.as_deref(),
+        agent.name.as_deref(),
+        agent.agent.as_deref(),
+        agent.title.as_deref(),
+    ]
 }
 
 /// Where an agent runs: its workspace, and its tab when that earns a place,
@@ -128,31 +149,116 @@ pub(super) fn agent_labels<'a>(
     (segments, name)
 }
 
-// Match the expanded upstream shell order, including orphaned linked worktrees.
+/// Prepared, comparable props for the cached sidebar, never loaded during render.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Indicators {
+    pub(super) style: IndicatorStyle,
+    colors: [u32; 5],
+}
 
-pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig, theme: &Theme) -> Div {
+impl Indicators {
+    pub(crate) fn new(settings: Option<&Settings>, light: bool, theme: &Theme) -> Self {
+        Self {
+            style: settings.map_or(IndicatorStyle::Dots, |settings| settings.indicators),
+            colors: [
+                AgentStatus::Unknown,
+                AgentStatus::Idle,
+                AgentStatus::Working,
+                AgentStatus::Done,
+                AgentStatus::Blocked,
+            ]
+            .map(|status| {
+                settings.map_or_else(
+                    || status_style(status, theme).2,
+                    |settings| theme.ink(settings.status_color(status, light)),
+                )
+            }),
+        }
+    }
+
+    pub(super) fn color(self, status: AgentStatus) -> u32 {
+        self.colors[match status {
+            AgentStatus::Unknown => 0,
+            AgentStatus::Idle => 1,
+            AgentStatus::Working => 2,
+            AgentStatus::Done => 3,
+            AgentStatus::Blocked => 4,
+        }]
+    }
+
+    pub(crate) fn width(self, font: &FontConfig) -> f32 {
+        match self.style {
+            IndicatorStyle::Dots => STATUS_WIDTH,
+            IndicatorStyle::Symbols => font.size.ceil().max(STATUS_WIDTH),
+        }
+    }
+}
+
+pub(super) fn status_symbol(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Working => "\u{25d0}",
+        AgentStatus::Blocked => "\u{d7}",
+        AgentStatus::Done => "\u{2713}",
+        AgentStatus::Idle => "\u{25cb}",
+        AgentStatus::Unknown => "\u{b7}",
+    }
+}
+
+pub(crate) fn status_indicator(
+    status: AgentStatus,
+    font: &FontConfig,
+    indicators: Indicators,
+) -> Div {
+    status_mark(status, font, indicators, indicators.color(status), false)
+}
+
+/// Configured tokens can override color and weight without changing indicator style.
+pub(super) fn status_mark(
+    status: AgentStatus,
+    font: &FontConfig,
+    indicators: Indicators,
+    color: u32,
+    bold: bool,
+) -> Div {
     // Upstream dots: working/blocked/done filled, idle hollow, unknown a small dot.
+    let (diameter, filled) = match status {
+        AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true),
+        AgentStatus::Idle => (STATUS_WIDTH, false),
+        _ => (STATUS_WIDTH, true),
+    };
+    let symbol = indicators.style == IndicatorStyle::Symbols;
+    let height = if symbol {
+        line_height(font)
+    } else {
+        STATUS_WIDTH
+    };
     div()
-        .size(px(STATUS_WIDTH))
-        .mt(px((line_height(font) - STATUS_WIDTH) / 2.))
+        .w(px(indicators.width(font)))
+        .h(px(height))
+        .mt(px((line_height(font) - height) / 2.))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .child(status_dot(status, theme))
-}
-
-/// The status dot alone, sized by its status, for callers that place it
-/// themselves.
-pub(crate) fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
-    let (diameter, filled, color) = status_style(status, theme);
-    div()
-        .flex_none()
-        .size(px(diameter))
-        .rounded_full()
-        .border_1()
-        .border_color(rgb(color))
-        .when(filled, |dot| dot.bg(rgb(color)))
+        .when(symbol, |slot| {
+            slot.overflow_hidden()
+                .text_size(px(font.size))
+                .line_height(px(line_height(font)))
+                .text_color(rgb(color))
+                .when(bold, |slot| slot.font_weight(FontWeight::BOLD))
+                .child(status_symbol(status))
+        })
+        .when(!symbol, |slot| {
+            slot.child(
+                div()
+                    .size(px(if bold { STATUS_WIDTH } else { diameter }))
+                    .rounded_full()
+                    .border_1()
+                    .when(bold, |dot| dot.border_2())
+                    .border_color(rgb(color))
+                    .when(filled, |dot| dot.bg(rgb(color))),
+            )
+        })
 }
 
 /// The word the daemon's `state_text` token shows for a status when its
@@ -166,6 +272,31 @@ pub(super) fn status_text(status: AgentStatus) -> &'static str {
         AgentStatus::Idle => "idle",
         AgentStatus::Unknown => "unknown",
     }
+}
+
+/// Herdr's own cap on a state label, so a longer one came from a peer that
+/// ignored it and is cut where the terminal client would have cut it.
+const STATE_LABEL_LIMIT: usize = 80;
+
+/// The words an agent's integration chose for its current status, as Herdr's
+/// `state_labels` metadata, else `fallback`. Labels are untrusted display
+/// text: bounded and stripped of controls and bidi overrides.
+pub(crate) fn state_label<'a>(
+    agent: &ClientShellAgent,
+    fallback: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    let key = status_text(agent.agent_status);
+    agent
+        .state_labels
+        .iter()
+        .find(|(state, _)| state == key)
+        .map(|(_, label)| crate::notifications::safe_text(label, STATE_LABEL_LIMIT))
+        .map(|label| label.trim().to_owned())
+        .filter(|label| !label.is_empty())
+        .map_or(
+            std::borrow::Cow::Borrowed(fallback),
+            std::borrow::Cow::Owned,
+        )
 }
 
 /// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,
@@ -182,4 +313,154 @@ pub(super) fn status_style(status: AgentStatus, theme: &Theme) -> (f32, bool, u3
         AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true, 0x6c7086),
     };
     (diameter, filled, theme.ink(color))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Indicators, sorted_agents, state_label, status_indicator};
+    use crate::{config::FontConfig, herdr_settings::IndicatorStyle};
+    use gpui::{Styled, rgb};
+    use herdr_client::protocol::AgentStatus;
+
+    #[test]
+    fn shared_palette_props_keep_style_and_follow_chrome_contrast() -> anyhow::Result<()> {
+        use crate::{config::Theme, contrast::Contrast, herdr_settings::Settings};
+        use anyhow::Context as _;
+        let settings = Settings::parse_text(
+            "[ui]\nstatus_indicators = 'symbols'\n[theme.custom]\nyellow = '#123456'\n",
+        )?;
+        for light in [false, true] {
+            for name in ["Default", "Catppuccin Latte"] {
+                let theme = Theme::builtin(name)
+                    .context("builtin theme")?
+                    .with_contrast(Contrast::High);
+                let indicators = Indicators::new(Some(&settings), light, &theme);
+                assert_eq!(indicators, Indicators::new(Some(&settings), light, &theme));
+                assert_eq!(indicators.style, IndicatorStyle::Symbols);
+                for status in [
+                    AgentStatus::Unknown,
+                    AgentStatus::Idle,
+                    AgentStatus::Working,
+                    AgentStatus::Done,
+                    AgentStatus::Blocked,
+                ] {
+                    assert_eq!(
+                        indicators.color(status),
+                        theme.ink(settings.status_color(status, light))
+                    );
+                    for background in [theme.background, theme.surface, theme.active] {
+                        assert!(
+                            crate::contrast::ratio(indicators.color(status), background)
+                                >= Contrast::High.mark_ratio()
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_custom_palette_keeps_each_authoritative_status_color() {
+        let font = FontConfig {
+            family: "Menlo".into(),
+            size: 16.,
+            fallbacks: None,
+        };
+        for style in [IndicatorStyle::Dots, IndicatorStyle::Symbols] {
+            let indicators = Indicators {
+                style,
+                colors: [0x112233, 0x223344, 0x334455, 0x445566, 0x556677],
+            };
+            for (status, expected) in [
+                (AgentStatus::Unknown, 0x112233),
+                (AgentStatus::Idle, 0x223344),
+                (AgentStatus::Working, 0x334455),
+                (AgentStatus::Done, 0x445566),
+                (AgentStatus::Blocked, 0x556677),
+            ] {
+                assert_eq!(indicators.color(status), expected);
+                if style == IndicatorStyle::Symbols {
+                    let mut slot = status_indicator(status, &font, indicators);
+                    assert_eq!(slot.text_style().color, Some(rgb(expected).into()));
+                }
+            }
+        }
+    }
+
+    /// An integration's label names the agent's current status; a label for
+    /// another status, a blank one, or none leaves the fallback. Labels are
+    /// untrusted: controls and bidi overrides go, and length is bounded.
+    #[test]
+    fn state_labels_name_the_current_status_as_safe_bounded_text() {
+        let agent = |status, labels: &[(&str, &str)]| herdr_client::protocol::ClientShellAgent {
+            pane_id: "p".into(),
+            workspace_id: "w".into(),
+            tab_id: "t".into(),
+            name: None,
+            display_agent: None,
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: status,
+            state_change_seq: 0,
+            state_labels: labels
+                .iter()
+                .map(|(state, label)| ((*state).into(), (*label).into()))
+                .collect(),
+            tokens: Vec::new(),
+            focused: false,
+        };
+        let labels = [("working", "deep in the mines"), ("blocked", "  ")];
+        for (status, fallback, expected) in [
+            (AgentStatus::Working, "working", "deep in the mines"),
+            (AgentStatus::Blocked, "blocked", "blocked"),
+            (AgentStatus::Done, "done", "done"),
+            (AgentStatus::Unknown, "", ""),
+        ] {
+            assert_eq!(state_label(&agent(status, &labels), fallback), expected);
+        }
+        let hostile = agent(
+            AgentStatus::Working,
+            &[("working", "\u{1b}[31mred\u{202e}dlrow\n")],
+        );
+        assert_eq!(state_label(&hostile, "working"), "[31mreddlrow");
+        let long = "x".repeat(10_000);
+        let long = agent(AgentStatus::Idle, &[("idle", &long)]);
+        assert_eq!(state_label(&long, "idle").chars().count(), 80);
+    }
+
+    fn ordered(
+        snapshot: &herdr_client::protocol::ClientShellSnapshot,
+        sort: crate::preferences::AgentSort,
+    ) -> Vec<&str> {
+        sorted_agents(snapshot, sort)
+            .into_iter()
+            .map(|agent| agent.pane_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_plugin_view_order_replaces_the_local_sort_and_filters() {
+        use crate::preferences::AgentSort;
+        let mut snapshot = crate::sidebar::layout_tests::snapshot(2);
+        snapshot.agents[1].agent_status = AgentStatus::Blocked;
+        // Without a view the order is local, even when the daemon sent one.
+        snapshot.agent_order = vec!["p1".into()];
+        assert_eq!(ordered(&snapshot, AgentSort::Grouped), ["p0", "p1"]);
+        assert_eq!(ordered(&snapshot, AgentSort::Priority), ["p1", "p0"]);
+
+        snapshot.agent_view_label = Some("review".into());
+        snapshot.agent_order = vec!["p1".into(), "gone".into(), "p0".into()];
+        for sort in [AgentSort::Grouped, AgentSort::Priority] {
+            // A pane the snapshot no longer lists as an agent is skipped.
+            assert_eq!(ordered(&snapshot, sort), ["p1", "p0"]);
+        }
+        snapshot.agents[1].agent_status = AgentStatus::Idle;
+        snapshot.agent_order = vec!["p0".into()];
+        assert_eq!(ordered(&snapshot, AgentSort::Priority), ["p0"]);
+        snapshot.agent_order.clear();
+        assert!(ordered(&snapshot, AgentSort::Grouped).is_empty());
+    }
 }

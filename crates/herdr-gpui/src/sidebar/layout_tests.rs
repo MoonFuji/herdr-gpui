@@ -223,6 +223,11 @@ impl ProbeText {
             )
             && bounds.top() >= mask.top()
             && bounds.bottom() <= mask.bottom()
+            // The expected column assumes the window leaves the default
+            // sidebar width alone. A frame painted mid-resize, such as the
+            // return from the 320px Preferences check, can narrow it.
+            && super::sidebar_width(None, f32::from(window.viewport_size().width))
+                == super::SIDEBAR_WIDTH
         {
             let mode = window
                 .root::<HerdrWindow>()
@@ -297,7 +302,7 @@ impl PaintedText {
 }
 
 #[cfg(test)]
-struct SidebarFixture(Entity<HerdrWindow>);
+pub(crate) struct SidebarFixture(pub(crate) Entity<HerdrWindow>);
 
 #[test]
 fn native_child_probe_reports_geometry_and_glyph_failures_without_panicking() {
@@ -396,6 +401,17 @@ pub(crate) const REPO_KEY: &str = if cfg!(windows) {
     "/fixture/agent-launcher/.git"
 };
 
+/// [`snapshot`] with the main checkout behind its upstream, one child
+/// diverged, and another in sync.
+#[cfg(test)]
+fn snapshot_with_upstream() -> ClientShellSnapshot {
+    let mut snapshot = snapshot(6);
+    for (index, counts) in [(0, (0, 18)), (4, (2, 3)), (5, (0, 0))] {
+        snapshot.workspaces[index].git_ahead_behind = Some(counts);
+    }
+    snapshot
+}
+
 pub(crate) fn snapshot(workspace_count: usize) -> ClientShellSnapshot {
     serde_json::from_value(serde_json::json!({
         "boot_id": "layout-test", "revision": 1,
@@ -470,6 +486,12 @@ fn terminal_redraws_reuse_the_cached_sidebar(cx: &mut gpui::TestAppContext) {
 
     // A hidden sidebar is not built, even for a full frame.
     view.update(cx, |view, cx| {
+        view.settings.shared = Some(
+            crate::herdr_settings::Settings::parse_text(
+                "[ui]\nsidebar_collapsed_mode = 'hidden'\n",
+            )
+            .unwrap(),
+        );
         view.sidebar_visible = false;
         cx.notify();
     });
@@ -568,7 +590,7 @@ fn agent_icons_follow_names_and_reserve_narrow_label_width(cx: &mut gpui::TestAp
 /// An agent's own `rows_by_agent` entry decides for it instead of `rows`.
 #[gpui::test]
 fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppContext) {
-    use crate::config::{AgentStatusText, Density, LayoutMode};
+    use crate::config::{Density, LayoutMode};
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = fixture_window(window, cx);
         view.live.snapshot = Some(Arc::new(snapshot(2)));
@@ -578,11 +600,14 @@ fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppCon
     cx.run_until_parked();
     // The fixture's agents are Claude.
     let settings = [
-        (AgentStatusText::default(), false),
-        (AgentStatusText::from_rows(true, []), true),
-        (AgentStatusText::from_rows(false, [("claude", true)]), true),
-        (AgentStatusText::from_rows(true, [("claude", false)]), false),
-        (AgentStatusText::from_rows(false, [("codex", true)]), false),
+        ("", false),
+        ("rows = [[\"state_text\"]]", true),
+        ("rows_by_agent.claude = [[\"state_text\"]]", true),
+        (
+            "rows = [[\"state_text\"]]\nrows_by_agent.claude = [[\"agent\"]]",
+            false,
+        ),
+        ("rows_by_agent.codex = [[\"state_text\"]]", false),
     ];
     for mode in [
         LayoutMode::from(Density::Comfortable),
@@ -595,7 +620,8 @@ fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppCon
                 view.config.layout.mode = mode;
                 view.config.sidebar.size = 12.;
                 view.sidebar_width = Some(320.);
-                view.config.agent_status_text = setting.clone();
+                view.config.sidebar_layout.agents = toml::from_str(setting).unwrap();
+                view.config.usage.inline = false;
                 cx.notify();
             });
             let rendered = cx.update(|window, cx| {
@@ -620,11 +646,250 @@ fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppCon
     }
 }
 
+/// An integration's `state_labels` replace the status word for the status
+/// it names, in every layout, as the terminal client's sidebar does; agents
+/// without one keep the plain word.
+#[gpui::test]
+fn agent_status_words_use_the_agents_state_labels(cx: &mut gpui::TestAppContext) {
+    use crate::config::{Density, LayoutMode};
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        let mut snapshot = snapshot(2);
+        snapshot.agents[0].state_labels = vec![
+            ("blocked".into(), "stuck".into()),
+            ("working".into(), "deep in the mines".into()),
+        ];
+        view.live.snapshot = Some(Arc::new(snapshot));
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    for mode in [
+        LayoutMode::from(Density::Comfortable),
+        LayoutMode::Superset,
+        LayoutMode::Orca,
+        LayoutMode::Minimal,
+    ] {
+        view.update(cx, |view, cx| {
+            view.config.layout.mode = mode;
+            view.config.sidebar.size = 12.;
+            view.sidebar_width = Some(320.);
+            view.config.sidebar_layout.agents =
+                toml::from_str("rows = [[\"state_text\"]]").unwrap();
+            view.config.usage.inline = false;
+            cx.notify();
+        });
+        let probes = cx.update(|window, cx| {
+            cx.default_global::<TextProbes>().0.clear();
+            full_draw(window, cx).clear(cx);
+            let probes = &cx.global::<TextProbes>().0;
+            ["deep in the mines", "stuck", "working"].map(|text| probes.contains_key(text))
+        });
+        // The second agent sets no labels, so it keeps the daemon's word.
+        assert_eq!(probes, [true, false, true], "{mode:?}");
+    }
+}
+
+#[gpui::test]
+fn configured_sidebar_rows_render_all_lines_within_the_row(cx: &mut gpui::TestAppContext) {
+    use crate::config::LayoutMode;
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot(2)));
+        view.config.sidebar_layout = toml::from_str(
+            r#"
+            [agents]
+            rows = [["state_icon", "workspace"], ["agent"], ["state_text"]]
+            [spaces]
+            rows = [["workspace"], ["state_text"], ["branch"]]
+        "#,
+        )
+        .unwrap();
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    for mode in LayoutMode::ALL {
+        for width in [160., 320.] {
+            view.update(cx, |view, cx| {
+                view.config.layout.mode = mode;
+                view.sidebar_width = Some(width);
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                cx.default_global::<TextProbes>().0.clear();
+                full_draw(window, cx).clear(cx);
+                let probes = &cx.global::<TextProbes>().0;
+                for text in ["herdr", "Claude Code", "working", "main"] {
+                    assert!(probes.contains_key(text), "{mode:?}: missing {text}");
+                }
+            });
+            assert!(cx.debug_bounds("status-agent-p0").is_none());
+            for (key, name, detail, last) in [
+                ("row-herdr", "name-herdr", "detail-herdr", "line-herdr-2"),
+                (
+                    "row-agent-p0",
+                    "name-agent-p0",
+                    "detail-agent-p0",
+                    "line-agent-p0-2",
+                ),
+            ] {
+                let row = cx.debug_bounds(key).unwrap();
+                let first = cx.debug_bounds(name).unwrap();
+                let second = cx.debug_bounds(detail).unwrap();
+                let third = cx.debug_bounds(last).unwrap();
+                assert!(first.bottom() <= second.top(), "{mode:?}: {key}");
+                assert!(second.bottom() <= third.top(), "{mode:?}: {key}");
+                assert!(third.bottom() <= row.bottom(), "{mode:?}: {key}");
+                for line in [first, second, third] {
+                    assert!(line.left() >= row.left(), "{mode:?}: {key}");
+                    assert!(line.right() <= row.right(), "{mode:?}: {key}");
+                }
+            }
+        }
+    }
+}
+
+/// Configured rows replace each layout's text, not its frame: Superset keeps
+/// its icon slot, every layout grows with the configured lines, and a config
+/// that does not lead with `state_icon` gives the status room to the text.
+#[gpui::test]
+fn configured_rows_keep_each_layouts_frame(cx: &mut gpui::TestAppContext) {
+    use crate::config::LayoutMode;
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot(2)));
+        view.sidebar_width = Some(320.);
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    let configure = |rows: &str, view: &Entity<HerdrWindow>, cx: &mut gpui::VisualTestContext| {
+        view.update(cx, |view, cx| {
+            view.config.sidebar_layout =
+                toml::from_str(&format!("[agents]\nrows = {rows}\n[spaces]\nrows = {rows}"))
+                    .unwrap();
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    for mode in [LayoutMode::Superset, LayoutMode::Orca, LayoutMode::Minimal] {
+        view.update(cx, |view, cx| {
+            view.config.layout.mode = mode;
+            cx.notify();
+        });
+        configure(r#"[["state_icon", "workspace"]]"#, &view, cx);
+        let one: Vec<_> = ["row-herdr", "row-agent-p0", "name-herdr", "name-agent-p0"]
+            .map(|key| cx.debug_bounds(key).unwrap())
+            .into();
+        if mode == LayoutMode::Superset {
+            for key in ["icon-herdr", "icon-agent-p0"] {
+                assert!(cx.debug_bounds(key).is_some(), "{mode:?}: {key}");
+            }
+        }
+        configure(
+            r#"[["state_icon", "workspace"], ["workspace"], ["state_text"]]"#,
+            &view,
+            cx,
+        );
+        for (index, key) in ["row-herdr", "row-agent-p0"].into_iter().enumerate() {
+            let three = cx.debug_bounds(key).unwrap();
+            assert!(
+                three.size.height > one[index].size.height,
+                "{mode:?}: {key} did not grow"
+            );
+        }
+        configure(r#"[["workspace"]]"#, &view, cx);
+        for (index, key) in ["name-herdr", "name-agent-p0"].into_iter().enumerate() {
+            let left = cx.debug_bounds(key).unwrap().left();
+            let leading = one[index + 2].left();
+            if mode == LayoutMode::Superset {
+                assert_eq!(left, leading, "{mode:?}: {key} moved off the slot");
+            } else {
+                assert!(left < leading, "{mode:?}: {key} kept the status room");
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn empty_configured_rows_keep_only_the_upstream_fallback(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(fixture_window);
+    for rows in [
+        "[]",
+        "[[\"$missing\"]]",
+        "[[{ token = \"workspace\", rules = [{ contains = \"\", hide = true }] }]]",
+    ] {
+        view.update(cx, |view, cx| {
+            view.config.sidebar_layout =
+                toml::from_str(&format!("[agents]\nrows = {rows}\n[spaces]\nrows = {rows}"))
+                    .unwrap();
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            cx.default_global::<TextProbes>().0.clear();
+            full_draw(window, cx).clear(cx);
+            let probes = &cx.global::<TextProbes>().0;
+            for text in ["herdr", "Claude Code", "main"] {
+                assert!(!probes.contains_key(text), "{rows}: unexpected {text}");
+            }
+        });
+        for key in ["row-herdr", "row-agent-p0"] {
+            assert!(cx.debug_bounds(key).unwrap().size.height > px(0.));
+        }
+        assert!(cx.debug_bounds("detail-agent-p0").is_none());
+    }
+}
+
+#[gpui::test]
+fn configured_inline_status_is_centered_in_its_glyph_budget(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(fixture_window);
+    let tolerance = cx.update(|window, _| px(1. / window.scale_factor()));
+    for (size, style) in [12., 20., 36.]
+        .into_iter()
+        .flat_map(|size| ["dots", "symbols"].map(|style| (size, style)))
+    {
+        view.update(cx, |view, cx| {
+            view.config.sidebar.size = size;
+            view.sidebar_width = Some(160.);
+            view.settings.shared = Some(
+                crate::herdr_settings::Settings::parse_text(&format!(
+                    "[ui]\nstatus_indicators = '{style}'\n"
+                ))
+                .unwrap(),
+            );
+            view.config.sidebar_layout.agents =
+                toml::from_str(r#"rows = [["workspace", "state_icon"]]"#).unwrap();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let cell = cx.debug_bounds("inline-status-cell").unwrap();
+        let mark = cx.debug_bounds("inline-status-mark").unwrap();
+        assert!(mark.size.width <= cell.size.width);
+        assert_eq!(
+            mark.size.width,
+            px(if style == "symbols" {
+                size
+            } else {
+                super::STATUS_WIDTH
+            })
+        );
+        assert!(
+            (cell.center().x - mark.center().x).abs() <= tolerance,
+            "size={size}, cell={cell:?}, mark={mark:?}"
+        );
+        assert!(
+            (cell.center().y - mark.center().y).abs() <= tolerance,
+            "size={size}, cell={cell:?}, mark={mark:?}"
+        );
+    }
+}
+
 /// A sidebar too narrow for the status word clips it within the row rather
 /// than letting it paint past the row's edge onto the terminal.
 #[gpui::test]
 fn agent_status_words_stay_inside_narrow_rows(cx: &mut gpui::TestAppContext) {
-    use crate::config::{AgentStatusText, Density, LayoutMode};
+    use crate::config::{Density, LayoutMode};
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = fixture_window(window, cx);
         view.live.snapshot = Some(Arc::new(snapshot(2)));
@@ -638,7 +903,9 @@ fn agent_status_words_stay_inside_narrow_rows(cx: &mut gpui::TestAppContext) {
                 view.config.layout.mode = LayoutMode::from(density);
                 view.config.sidebar.size = font;
                 view.sidebar_width = Some(width);
-                view.config.agent_status_text = AgentStatusText::from_rows(true, []);
+                view.config.sidebar_layout.agents =
+                    toml::from_str("rows = [[\"state_text\"]]").unwrap();
+                view.config.usage.inline = false;
                 cx.notify();
             });
             cx.update(|window, cx| {
@@ -664,7 +931,7 @@ fn check_layouts(modes: &[crate::config::LayoutMode], cx: &mut gpui::TestAppCont
     use crate::config::LayoutMode;
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = fixture_window(window, cx);
-        view.live.snapshot = Some(Arc::new(snapshot(6)));
+        view.live.snapshot = Some(Arc::new(snapshot_with_upstream()));
         let input = crate::pull_request::Input {
             checkout: None,
             repo_key: REPO_KEY.into(),
@@ -756,12 +1023,38 @@ fn check_layouts(modes: &[crate::config::LayoutMode], cx: &mut gpui::TestAppCont
                         "{context}: badge {badge:?} {row:?}"
                     );
                     assert!(cx.debug_bounds("dirty-sidebar-child").is_some());
-                    let teleported = cx
-                        .debug_bounds("teleported-sidebar-child")
-                        .unwrap_or_else(|| panic!("{context}: no teleported mark"));
-                    assert!(teleported.right() <= row.right(), "{context}");
-                    assert!(cx.debug_bounds("teleported-herdr").is_none(), "{context}");
                 }
+                // Minimal rows leave upstream counts off too; the rest keep
+                // them inside the row, and never on a branch in sync.
+                if mode != LayoutMode::Minimal {
+                    for (key, row, upstream) in [
+                        ("herdr", "row-herdr", "upstream-herdr"),
+                        (
+                            "sidebar-child",
+                            "row-sidebar-child",
+                            "upstream-sidebar-child",
+                        ),
+                    ] {
+                        let row = cx.debug_bounds(row).unwrap();
+                        let upstream = cx
+                            .debug_bounds(upstream)
+                            .unwrap_or_else(|| panic!("{context}: no upstream on {key}"));
+                        assert!(upstream.right() <= row.right(), "{context}: {key}");
+                        assert!(upstream.bottom() <= row.bottom(), "{context}: {key}");
+                    }
+                }
+                assert!(
+                    cx.debug_bounds("upstream-sidebar-child-with-a-long-readable-branch-name")
+                        .is_none(),
+                    "{context}"
+                );
+                // Every layout, Minimal included, marks a teleported checkout.
+                let row = cx.debug_bounds("row-sidebar-child").unwrap();
+                let teleported = cx
+                    .debug_bounds("teleported-sidebar-child")
+                    .unwrap_or_else(|| panic!("{context}: no teleported mark"));
+                assert!(teleported.right() <= row.right(), "{context}");
+                assert!(cx.debug_bounds("teleported-herdr").is_none(), "{context}");
                 // Only the focused workspace draws a selection mark in the
                 // layouts whose highlight exists only while selected.
                 assert!(cx.debug_bounds("highlight-herdr").is_some() || mode == LayoutMode::Orca);
@@ -1091,6 +1384,82 @@ fn multi_host_rows_scope_duplicate_ids_and_keep_agents_when_host_collapses(
     assert!(cx.debug_bounds("agent-ssh:test-p0").is_some());
 }
 
+/// A second main checkout of the fixture repository stays a top-level parent
+/// in every row layout and on every host: both parents lead the group, each
+/// with its own fold arrow, ahead of the linked worktrees.
+#[gpui::test]
+fn duplicate_repository_parents_lead_one_group_in_every_layout_and_host(
+    cx: &mut gpui::TestAppContext,
+) {
+    for mode in crate::config::LayoutMode::ALL {
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            view.config.layout.mode = mode;
+            let mut local = snapshot(7);
+            let mut duplicate = local.workspaces[3].clone();
+            duplicate.workspace_id = "w7".into();
+            duplicate.label = "agent-launcher-copy".into();
+            duplicate.focused = false;
+            local.workspaces.push(duplicate);
+            let mut remote = crate::endpoint::Endpoint::new(
+                "ssh:test".into(),
+                "Remote".into(),
+                ConnectTarget::Ssh {
+                    target: "unused".into(),
+                    session: "default".into(),
+                },
+                true,
+            );
+            remote.live.snapshot = Some(Arc::new(local.clone()));
+            view.live.snapshot = Some(Arc::new(local));
+            view.endpoints.push(remote);
+            view
+        });
+        cx.simulate_resize(size(px(800.), px(1600.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+        // Debug selectors must be static, so each host's rows are spelled out.
+        for (host, rows) in [
+            (
+                "local",
+                [
+                    "workspace-local-w3",
+                    "workspace-local-w7",
+                    "workspace-local-w4",
+                    "workspace-local-w5",
+                    "workspace-local-w6",
+                ],
+            ),
+            (
+                "ssh:test",
+                [
+                    "workspace-ssh:test-w3",
+                    "workspace-ssh:test-w7",
+                    "workspace-ssh:test-w4",
+                    "workspace-ssh:test-w5",
+                    "workspace-ssh:test-w6",
+                ],
+            ),
+        ] {
+            let order = rows.map(|row| {
+                cx.debug_bounds(row)
+                    .unwrap_or_else(|| panic!("{mode:?} {host}: missing {row}"))
+                    .top()
+            });
+            assert!(
+                order.windows(2).all(|pair| pair[0] < pair[1]),
+                "{mode:?} {host}: {order:?}"
+            );
+        }
+        for arrow in ["collapse-3", "collapse-7"] {
+            assert!(
+                cx.debug_bounds(arrow).is_some(),
+                "{mode:?}: missing {arrow}"
+            );
+        }
+    }
+}
+
 /// A frame that renders every view. The sidebar is a cached view, which GPUI
 /// replays without recording debug bounds; these tests measure layout, so each
 /// of their frames is a full one, as every frame was before the cache.
@@ -1104,15 +1473,21 @@ pub(crate) fn full_draw(window: &mut Window, cx: &mut App) -> ArenaClearNeeded {
 pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>) -> HerdrWindow {
     HerdrWindow {
         sound: Default::default(),
+        bell: Default::default(),
         updater: crate::updater::Updater::default(),
         update_preview: None,
+        daemon_text: Default::default(),
         removal: None,
         teleport: None,
         teleport_marks: crate::teleport::Marks::detached(),
         teleport_follow: None,
         selection: None,
+        selection_follow: Default::default(),
+        find: None,
+        copy_mode: None,
         flash: None,
         configured_terminal_size: crate::config::Config::default().terminal.size,
+        gui_config_diagnostic: Default::default(),
         // Keep the original geometry fixture explicit; density-switching tests
         // above exercise all three modes independently of the default.
         config: crate::config::Config {
@@ -1129,7 +1504,9 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         config_load_revision: 0,
         git: Default::default(),
         usage: Default::default(),
+        system_load: Default::default(),
         sidebar_visible: true,
+        sidebar_start_pending: true,
         device_filter: None,
         endpoints: vec![crate::endpoint::Endpoint::new(
             crate::endpoint::LOCAL.into(),
@@ -1166,12 +1543,14 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         cell_width: 9.,
         hovered_terminal_link: false,
         pressed_terminal_link: None,
+        links: Default::default(),
         terminal_mouse: None,
         scrollbar_drag: None,
         split_drag: None,
         split_cursor: None,
         pending_images: Vec::new(),
         pending_input: Default::default(),
+        held_keys: Default::default(),
         file_transfer: None,
         presentation: Default::default(),
         painter: Default::default(),
@@ -1180,6 +1559,8 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         hover_menu: None,
         local_error: None,
         menu: crate::menu::MenuState::new(cx),
+        settings: Default::default(),
+        integrations: Default::default(),
         install_warning_shown: false,
         collapsed_repos: Default::default(),
         wheel: WheelAccumulator::default(),
@@ -1200,15 +1581,27 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         sidebar_revealed: Default::default(),
         _poll: Task::ready(()),
         _activation: cx.observe_window_activation(window, |_, _, _| {}),
+        _appearance: cx.observe_window_appearance(window, |this, _, cx| {
+            this.apply_shared_theme(cx);
+            cx.notify();
+        }),
         sidebar_view: {
             let weak = cx.weak_entity();
-            cx.new(|_| crate::sidebar::SidebarView::new(weak))
+            cx.new(|_| {
+                crate::sidebar::SidebarView::new(
+                    weak,
+                    super::agents::Indicators::new(None, false, &crate::config::Theme::default()),
+                )
+            })
         },
         surface_signal: cx.new(|_| crate::window::SurfaceSignal),
         _sidebar_invalidation: HerdrWindow::invalidate_sidebar(cx),
+        _host_theme: HerdrWindow::observe_host_theme(cx),
         browser: crate::browser::Browser::new(cx),
         _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
         prefix_armed: false,
+        resize_mode: false,
+        server_keys: None,
         _prefix_interceptor: HerdrWindow::intercept_prefix(window, cx),
     }
 }
@@ -1855,19 +2248,25 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
             gpui::EntityInputHandler::unmark_text(input, window, cx)
         });
     });
-    cx.simulate_keystrokes("escape cmd-,");
+    cx.simulate_keystrokes("escape");
+    // Exercise the retained modal, not the standalone Settings command.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+    });
+    // General has enough content to exercise the independent body scroll.
+    cx.simulate_keystrokes("shift-tab");
     cx.simulate_resize(size(px(360.), px(240.)));
     cx.update(|window, cx| full_draw(window, cx).clear(cx));
     let header = cx.debug_bounds("preferences-header").unwrap();
     let footer = cx.debug_bounds("preferences-footer").unwrap();
     let body = cx.debug_bounds("preferences-body").unwrap();
-    let theme_row = cx.debug_bounds("preferences-theme").unwrap();
+    let usage_row = cx.debug_bounds("preferences-show-usage").unwrap();
     assert!(body.size.height > px(0.));
     assert!(header.bottom() <= body.top());
     assert!(body.bottom() <= footer.top());
     cx.simulate_keystrokes("pagedown");
     cx.update(|window, cx| full_draw(window, cx).clear(cx));
-    assert!(cx.debug_bounds("preferences-theme").unwrap().top() < theme_row.top());
+    assert!(cx.debug_bounds("preferences-show-usage").unwrap().top() < usage_row.top());
     assert_eq!(cx.debug_bounds("preferences-header").unwrap(), header);
     assert_eq!(cx.debug_bounds("preferences-footer").unwrap(), footer);
     let close = cx.debug_bounds("preferences-close").unwrap();
@@ -1958,7 +2357,12 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
         }
     }
     cx.simulate_resize(size(px(800.), px(600.)));
-    cx.simulate_keystrokes("cmd-,");
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_preferences_fixture(window, cx);
+            view.select_settings_tab(crate::settings_panel::Tab::Theme, window, cx)
+        });
+    });
     cx.update(|window, cx| full_draw(window, cx).clear(cx));
     let choose_theme = cx.debug_bounds("preferences-choose-theme").unwrap();
     cx.simulate_click(choose_theme.center(), Default::default());
@@ -2066,7 +2470,10 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
         assert!(view.read(cx).menu.page.is_none());
         assert!(view.read(cx).focus.is_focused(window));
     });
-    cx.simulate_keystrokes("cmd-b cmd-,");
+    cx.simulate_keystrokes("cmd-b");
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+    });
     cx.update(|_, cx| {
         assert!(view.read(cx).sidebar_visible);
         assert!(view.read(cx).menu.page == Some(crate::menu::Page::Preferences));
@@ -2917,7 +3324,7 @@ fn the_sidebar_menu_stays_clear_of_the_window_chrome(cx: &mut gpui::TestAppConte
 }
 
 #[gpui::test]
-fn device_footer_filters_both_lists_and_opens_settings(cx: &mut gpui::TestAppContext) {
+fn device_footer_filters_both_lists_and_keeps_settings_visible(cx: &mut gpui::TestAppContext) {
     let (fixture, cx) = cx.add_window_view(|window, cx| {
         crate::bind_keys(cx);
         let view = cx.new(|cx| fixture_window(window, cx));
@@ -3012,8 +3419,12 @@ fn device_footer_filters_both_lists_and_opens_settings(cx: &mut gpui::TestAppCon
         full_draw(window, cx).clear(cx);
     });
     assert!(cx.debug_bounds("host-ssh:fixture").is_some());
-    let settings = cx.debug_bounds("device-settings").unwrap().center();
-    cx.simulate_click(settings, Modifiers::default());
+    assert!(cx.debug_bounds("device-settings").is_some());
+    // Command routing belongs to settings_window tests; this fixture keeps
+    // testing the legacy modal without starting the personal config loader.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+    });
     cx.update(|_, cx| {
         assert_eq!(
             view.read(cx).menu.page,
@@ -3247,6 +3658,74 @@ fn the_agents_header_toggles_between_grouped_and_priority(cx: &mut gpui::TestApp
     });
 }
 
+/// A plugin's agent view names the panel and decides its rows: the daemon's
+/// `agent_order` replaces the local sort, agents it leaves out stay hidden,
+/// and the local toggle neither shows nor changes while the view holds.
+#[gpui::test]
+fn a_plugin_agent_view_orders_and_filters_the_agents(cx: &mut gpui::TestAppContext) {
+    use crate::preferences::AgentSort;
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        crate::bind_keys(cx);
+        let view = cx.new(|cx| fixture_window(window, cx));
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        SidebarFixture(view)
+    });
+    let view = cx.update(|_, cx| fixture.read(cx).0.clone());
+    let set_view = |cx: &mut gpui::VisualTestContext, order: &[&str]| {
+        let order = order.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| {
+                let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+                snapshot.agent_view_label = Some("review".into());
+                snapshot.agent_order = order;
+            });
+            cx.default_global::<TextProbes>().0.clear();
+            window.refresh();
+            full_draw(window, cx).clear(cx);
+        });
+    };
+    cx.simulate_resize(size(px(800.), px(600.)));
+    cx.run_until_parked();
+
+    // Grouped would paint p0 first; the view puts p1 above it.
+    set_view(cx, &["p1", "p0"]);
+    let (first, second) = (
+        cx.debug_bounds("row-agent-p1").unwrap(),
+        cx.debug_bounds("row-agent-p0").unwrap(),
+    );
+    assert!(first.top() < second.top(), "{first:?} {second:?}");
+    cx.update(|_, cx| {
+        let probes = &cx.global::<TextProbes>().0;
+        assert!(probes.contains_key("review"), "{:?}", probes.keys());
+        assert!(!probes.contains_key("grouped"), "{:?}", probes.keys());
+    });
+    // The label is the plugin's, so clicking it must not flip the local sort.
+    let sort = cx.debug_bounds("agents-sort").unwrap();
+    cx.simulate_click(sort.center(), Default::default());
+    cx.update(|_, cx| {
+        let view = view.read(cx);
+        assert_eq!(view.agent_sort, AgentSort::Grouped);
+        assert!(!view.agent_sort_modified);
+    });
+
+    // An agent the view filtered out is not listed.
+    set_view(cx, &["p1"]);
+    assert!(cx.debug_bounds("row-agent-p1").is_some());
+    assert!(cx.debug_bounds("row-agent-p0").is_none());
+
+    // No match is the view's answer, not an absence of agents.
+    set_view(cx, &[]);
+    assert!(cx.debug_bounds("row-agent-p1").is_none());
+    cx.update(|_, cx| {
+        let probes = &cx.global::<TextProbes>().0;
+        assert!(
+            probes.contains_key("no matching agents"),
+            "{:?}",
+            probes.keys()
+        );
+    });
+}
+
 /// Resting the pointer on a workspace opens the menu its right click opens,
 /// once, and only after the pointer has both moved and settled. The behavior
 /// is opt-in, so the test turns its feature flag on.
@@ -3413,7 +3892,8 @@ fn preferences_list_feature_flags(cx: &mut gpui::TestAppContext) {
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.config.features.sidebar_hover_menu = enabled;
-                view.open_preferences(window, cx);
+                view.open_preferences_fixture(window, cx);
+                view.select_settings_tab(crate::settings_panel::Tab::General, window, cx);
             });
             full_draw(window, cx).clear(cx);
         });
@@ -3435,6 +3915,118 @@ fn preferences_list_feature_flags(cx: &mut gpui::TestAppContext) {
                 "{label} row outside the body"
             );
         }
+    }
+}
+
+#[gpui::test]
+fn preferences_tabs_stay_on_one_row_and_font_input_keeps_native_focus(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::settings_panel::Tab;
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        crate::bind_keys(cx);
+        fixture_window(window, cx)
+    });
+    cx.simulate_resize(size(px(320.), px(400.)));
+    cx.update(|window, cx| {
+        let focus = view.read(cx).focus.clone();
+        window.focus(&focus, cx);
+        window.draw(cx).clear(cx);
+    });
+    // Opening the modal changes the focus tree; paint it before routing the next key.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+        window.draw(cx).clear(cx);
+        assert!(view.read(cx).menu.page == Some(crate::menu::Page::Preferences));
+        assert!(view.read(cx).menu.focus.is_focused(window));
+    });
+    cx.simulate_keystrokes("shift-tab");
+    cx.update(|window, cx| {
+        assert_eq!(view.read(cx).settings.tab, Tab::General);
+        window.draw(cx).clear(cx);
+    });
+    let panel = cx.debug_bounds("menu-panel").unwrap();
+    let tabs = cx.debug_bounds("preferences-tabs").unwrap();
+    assert!(tabs.left() >= panel.left() && tabs.right() <= panel.right());
+    let first = cx.debug_bounds("preferences-tab-Theme").unwrap();
+    for selector in [
+        "preferences-tab-Theme",
+        "preferences-tab-Indicators",
+        "preferences-tab-Sound",
+        "preferences-tab-Toasts",
+        "preferences-tab-Integrations",
+        "preferences-tab-Font",
+        "preferences-tab-General",
+    ] {
+        let bounds = cx.debug_bounds(selector).unwrap();
+        assert_eq!(bounds.top(), first.top(), "tabs must never wrap");
+        assert_eq!(bounds.size.height, first.size.height);
+    }
+    let selected = cx.debug_bounds("preferences-tab-General").unwrap();
+    assert!(selected.left() >= tabs.left() && selected.right() <= tabs.right());
+    assert!(view.read_with(cx, |view, _| view.settings.tabs_scroll.offset().x < px(0.)));
+    cx.simulate_keystrokes("tab");
+    cx.update(|window, cx| {
+        assert_eq!(view.read(cx).settings.tab, Tab::Theme);
+        view.update(cx, |view, cx| {
+            view.select_settings_tab(Tab::Font, window, cx)
+        });
+        window.draw(cx).clear(cx);
+    });
+    assert!(cx.debug_bounds("preferences-font-terminal").is_some());
+    let input = cx.debug_bounds("preferences-font-sidebar-size").unwrap();
+    cx.simulate_click(input.center(), Default::default());
+    cx.simulate_keystrokes("cmd-a 1 8 tab");
+    cx.update(|_, cx| assert_eq!(view.read(cx).settings.tab, Tab::Font));
+    // Escape first leaves the editor, then Tab resumes section navigation.
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("tab");
+    cx.update(|_, cx| assert_eq!(view.read(cx).settings.tab, Tab::General));
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, cx| assert!(view.read(cx).focus.is_focused(window)));
+}
+
+#[gpui::test]
+fn preferences_tabs_fit_desktop_and_shared_details_only_appear_in_general(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::settings_panel::Tab;
+    let (view, cx) = cx.add_window_view(fixture_window);
+    cx.simulate_resize(size(px(1200.), px(850.)));
+    for font_size in [12., 16.] {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.config.ui.size = font_size;
+                view.menu.page = Some(crate::menu::Page::Preferences);
+                view.select_settings_tab(Tab::Theme, window, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        let tabs = cx.debug_bounds("preferences-tabs").unwrap();
+        let first = cx.debug_bounds("preferences-tab-Theme").unwrap();
+        let last = cx.debug_bounds("preferences-tab-General").unwrap();
+        assert_eq!(first.top(), last.top());
+        assert!(first.left() >= tabs.left() && last.right() <= tabs.right());
+    }
+    for tab in [
+        Tab::Theme,
+        Tab::Indicators,
+        Tab::Sound,
+        Tab::Toasts,
+        Tab::General,
+    ] {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.select_settings_tab(tab, window, cx));
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("preferences-shared-path").is_some(),
+            tab == Tab::General,
+        );
+        assert_eq!(
+            cx.debug_bounds("preferences-reload-shared").is_some(),
+            tab == Tab::General,
+        );
     }
 }
 
@@ -4143,12 +4735,13 @@ fn holding_a_workspace_row_lifts_it_and_a_release_picks_the_gap(cx: &mut gpui::T
 /// pointer, the row it passes closes its place, and a release without a
 /// daemon puts every row back.
 #[cfg(test)]
-fn check_row_drag(style: crate::config::LayoutMode, cx: &mut gpui::TestAppContext) {
+fn check_row_drag(style: crate::config::LayoutMode, row_gap: u16, cx: &mut gpui::TestAppContext) {
     use gpui::{MouseButton, point};
 
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = fixture_window(window, cx);
         view.config.layout.mode = style;
+        view.config.sidebar_layout.spaces.row_gap = row_gap;
         view.live.status = crate::state::ConnectionStatus::Connected;
         view
     });
@@ -4197,18 +4790,23 @@ fn check_row_drag(style: crate::config::LayoutMode, cx: &mut gpui::TestAppContex
 }
 
 #[gpui::test]
+fn configured_row_gap_is_included_in_drag_displacement(cx: &mut gpui::TestAppContext) {
+    check_row_drag(crate::config::LayoutMode::default(), 1, cx);
+}
+
+#[gpui::test]
 fn superset_rows_lift_and_drop(cx: &mut gpui::TestAppContext) {
-    check_row_drag(crate::config::LayoutMode::Superset, cx);
+    check_row_drag(crate::config::LayoutMode::Superset, 0, cx);
 }
 
 #[gpui::test]
 fn orca_rows_lift_and_drop(cx: &mut gpui::TestAppContext) {
-    check_row_drag(crate::config::LayoutMode::Orca, cx);
+    check_row_drag(crate::config::LayoutMode::Orca, 0, cx);
 }
 
 #[gpui::test]
 fn minimal_rows_lift_and_drop(cx: &mut gpui::TestAppContext) {
-    check_row_drag(crate::config::LayoutMode::Minimal, cx);
+    check_row_drag(crate::config::LayoutMode::Minimal, 0, cx);
 }
 
 #[gpui::test]
@@ -4279,4 +4877,83 @@ fn every_layout_looks_different(cx: &mut gpui::TestAppContext) {
         }
         seen.push((mode, signature));
     }
+}
+
+#[test]
+fn teleported_names_fade_but_stay_legible() {
+    use crate::config::Theme;
+    use crate::contrast::{Contrast, ratio};
+    for name in Theme::BUILTIN_NAMES {
+        for contrast in [Contrast::Standard, Contrast::High] {
+            let theme = Theme::builtin(name).unwrap().with_contrast(contrast);
+            for color in [theme.foreground, theme.subtext()] {
+                let faded = super::row::left_behind(color, &theme);
+                let context = format!("{name} {contrast:?} {color:06x} -> {faded:06x}");
+                assert!(
+                    ratio(faded, theme.background) < ratio(color, theme.background),
+                    "{context}: not faded"
+                );
+                assert!(
+                    ratio(faded, theme.background) >= Contrast::Standard.mark_ratio() - 0.01,
+                    "{context}: unreadable"
+                );
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn upstream_counts_follow_the_branch_or_trail_one_line_rows(cx: &mut gpui::TestAppContext) {
+    use crate::config::{Density, LayoutMode, Style};
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot_with_upstream()));
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    let draw = |density, cx: &mut gpui::VisualTestContext| {
+        view.update(cx, |view, cx| {
+            view.config.layout.mode = LayoutMode::Classic {
+                density,
+                style: Style::Flat,
+            };
+            view.sidebar_width = Some(320.);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            cx.default_global::<TextProbes>().0.clear();
+            full_draw(window, cx).clear(cx);
+            let probes = &cx.global::<TextProbes>().0;
+            assert!(probes.contains_key("\u{2193}18"), "{density:?}");
+            assert!(probes.contains_key("\u{2191}2"), "{density:?}");
+            assert!(probes.contains_key("\u{2193}3"), "{density:?}");
+            assert!(!probes.contains_key("\u{2191}0"), "{density:?}");
+        });
+    };
+
+    // Like the TUI's `main ↓18`: the counts sit right after the branch on
+    // the repository's second line, not pushed to the row's edge.
+    draw(Density::Normal, cx);
+    let detail = cx.debug_bounds("detail-herdr").unwrap();
+    let name = cx.debug_bounds("name-herdr").unwrap();
+    let upstream = cx.debug_bounds("upstream-herdr").unwrap();
+    assert!(upstream.top() >= name.bottom());
+    assert!(upstream.left() >= detail.right());
+    assert!(upstream.left() - detail.right() < px(20.));
+    assert!(upstream.right() < cx.debug_bounds("row-herdr").unwrap().right() - px(100.));
+    // A one-line worktree child keeps them in a trailing column instead.
+    let child = cx.debug_bounds("name-sidebar-child").unwrap();
+    let trailing = cx.debug_bounds("upstream-sidebar-child").unwrap();
+    assert_eq!(trailing.top(), child.top());
+    assert!(trailing.left() >= child.right());
+
+    // Compact rows have no branch line, so the repository's counts trail
+    // its name on the one line it has.
+    draw(Density::Compact, cx);
+    let name = cx.debug_bounds("name-herdr").unwrap();
+    let upstream = cx.debug_bounds("upstream-herdr").unwrap();
+    assert_eq!(upstream.top(), name.top());
+    assert!(upstream.left() >= name.right());
+    assert!(cx.debug_bounds("detail-herdr").is_none());
 }

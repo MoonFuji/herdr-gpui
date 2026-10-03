@@ -254,11 +254,11 @@ mod groups {
             return;
         };
         click(cx, selector(format!("g1-tab-{other}")));
-        // Until the daemon focuses it, the group stands in for it.
-        assert_eq!(
-            shown(&view, cx)[1],
-            Shown::Elsewhere(Pick::Herdr(other.clone()))
-        );
+        // Until the daemon focuses it, the group keeps drawing the
+        // terminal's frame rather than flashing a stand-in.
+        assert_eq!(shown(&view, cx)[1], Shown::Terminal);
+        assert!(cx.debug_bounds("g1-stand-in").is_none());
+        assert!(cx.debug_bounds("terminal").is_some());
         // Once it does, the group shows it and the other keeps its tab.
         cx.update(|_, cx| {
             view.update(cx, |view, cx| {
@@ -271,6 +271,27 @@ mod groups {
             shown(&view, cx),
             [Shown::Elsewhere(herdr("t0")), Shown::Terminal]
         );
+    }
+
+    #[gpui::test]
+    fn switching_tabs_keeps_the_terminal_until_the_daemon_focuses(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = window(cx);
+        draw(cx);
+        let other = view.read_with(cx, |view, _| {
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            snapshot
+                .tabs
+                .iter()
+                .find(|tab| tab.workspace_id == "w0" && tab.tab_id != "t0")
+                .map(|tab| tab.tab_id.clone())
+        });
+        let Some(other) = other else {
+            return;
+        };
+        click(cx, selector(format!("tab-{other}")));
+        assert_eq!(shown(&view, cx), [Shown::Terminal]);
+        assert!(cx.debug_bounds("stand-in").is_none());
+        assert!(cx.debug_bounds("terminal").is_some());
     }
 
     #[gpui::test]
@@ -333,9 +354,9 @@ mod groups {
         cx.update(|_, cx| view.update(cx, |view, _| view.browser.group_motion.enable()));
         draw(cx);
         let whole = cx.debug_bounds("group").unwrap();
-        run(&view, cx, Command::SplitEditor);
         let early = crate::motion::ENTER / 8;
         cx.update(|_, cx| view.update(cx, |view, _| view.browser.group_motion.freeze(early)));
+        run(&view, cx, Command::SplitEditor);
         draw(cx);
         // Early on, the source still has most of the row, and the new group,
         // laid out at its settled width, is only partly uncovered from the
@@ -365,12 +386,12 @@ mod groups {
         let [_, right] = groups(&view, cx)[..] else {
             panic!("two groups")
         };
-        cx.update(|window, cx| view.update(cx, |view, cx| view.close_group(right, window, cx)));
         cx.update(|_, cx| {
             view.update(cx, |view, _| {
                 view.browser.group_motion.freeze(std::time::Duration::ZERO)
             })
         });
+        cx.update(|window, cx| view.update(cx, |view, cx| view.close_group(right, window, cx)));
         draw(cx);
         let folding = cx.debug_bounds("folding-group").unwrap();
         let left = cx.debug_bounds("group").unwrap();
@@ -493,15 +514,14 @@ fn a_tab_that_opens_grows_into_the_strip(cx: &mut gpui::TestAppContext) {
     let tab = cx.debug_bounds("tab-t0").unwrap();
     assert!(tab.size.width >= gpui::px(crate::TAB_WIDTH));
     view.read_with(cx, |view, _| assert!(!view.tabs_growing()));
+    // Held from before it starts, so no frame can outrun it: narrow and clear.
+    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
     cx.update(|_, cx| {
         let scope = scope(&view.read(cx).endpoints[0]);
         Store::update(cx, |store| store.open(scope, "w0", None, None));
     });
     draw(cx);
     view.read_with(cx, |view, _| assert!(view.tabs_growing()));
-    // Held where it started: narrow and clear.
-    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
-    draw(cx);
     let growing = cx.debug_bounds("browser-tab-0").unwrap();
     assert!(
         growing.size.width < gpui::px(crate::TAB_WIDTH / 2.),
@@ -512,11 +532,10 @@ fn a_tab_that_opens_grows_into_the_strip(cx: &mut gpui::TestAppContext) {
     cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear = Default::default()));
     draw(cx);
     let whole = cx.debug_bounds("browser-tab-0").unwrap();
+    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
     cx.update(|_, cx| Store::update(cx, |store| store.close(crate::browser::TabId::test(0))));
     draw(cx);
     assert!(cx.debug_bounds("browser-tab-0").is_none());
-    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
-    draw(cx);
     let leaving = cx.debug_bounds("leaving-tab").unwrap();
     assert_eq!(leaving.left(), whole.left());
     // Its measured width, within a pixel or two of the tab it replaces.
