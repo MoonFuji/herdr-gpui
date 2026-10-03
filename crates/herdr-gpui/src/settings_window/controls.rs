@@ -388,7 +388,7 @@ impl SettingsWindow {
             .child(label)
     }
 
-    fn controls_shared_ready(&self) -> bool {
+    pub(super) fn controls_shared_ready(&self) -> bool {
         cfg!(unix) && self.shared.is_some() && !self.busy() && self.error.is_none()
     }
 

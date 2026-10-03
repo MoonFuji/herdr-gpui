@@ -424,15 +424,29 @@ texts are daemon data shown as text only: control characters are stripped,
 `http`/`https` links open in the browser only when clicked, and a displayed
 install command is never run.
 
-**Plugins** lists, for every enabled host, the plugin actions that host binds
-with a `[[keys.command]]` entry of `type = "plugin_action"`, taken from the
-snapshot's command manifest. Its search field filters action names and key
-labels. **Run** sends `command.invoke` on the selected host's focused workspace,
-tab, and pane, as the command palette does; another host's actions run after
-selecting that host. Herdr's binary endpoint offers no `plugin.*` method, so the
-GUI cannot list installed plugins or their versions, enable or disable them,
-read plugin logs, or run actions without a key binding. Use `herdr plugin` on
-the host for those. Nothing is installed from Settings.
+**Plugins** shows what each enabled host's plugins hand to this app, from the
+snapshot alone:
+
+- **Sidebar values**: every custom `$name` value plugins and hooks report for
+  agents or workspaces (`pane.report_metadata`, `workspace.report_metadata`),
+  with an example and the hosts reporting it, plus agent status labels. Each
+  has a switch that adds the token as its own row to `[ui.sidebar.agents]` or
+  `[ui.sidebar.spaces]` `rows` in the shared Herdr config, or removes it there,
+  so the TUI shows the same rows. Showing a token when `rows` is unset writes
+  out Herdr's default rows first; per-agent `rows_by_agent` overrides are never
+  edited. Tokens already in `rows` stay listed while unreported, so they can be
+  hidden. The switches are read-only where shared settings are (Windows).
+- **Per host**: the plugin agent view in use, and the plugin actions that host
+  binds with a `[[keys.command]]` entry of `type = "plugin_action"`. **Run**
+  sends `command.invoke` on the selected host's focused workspace, tab, and
+  pane, as the command palette does; another host's actions run after
+  selecting that host.
+
+The search field filters values, examples, actions, and key labels. Herdr's
+binary endpoint offers no `plugin.*` method, so the GUI cannot list installed
+plugins or their versions, enable or disable them, read plugin logs, run actions
+without a key binding, or tell which plugin reported a value. Use `herdr plugin`
+on the host for those. Nothing is installed from Settings.
 
 The terminal face can also be resized for the current session from the View menu,
 the in-app menu, the command palette, or `cmd-=` / `cmd--` / `cmd-0`. Adjustments
@@ -1422,7 +1436,8 @@ Windows setup) nothing is saved and the window says so.
   reads nor downloads block rendering; sign-out discards profile refresh results.
 - In-app sidebar menu for settings, keybinds, config reload, update information,
   and detach/reconnect. The standalone Settings window combines shared Herdr settings,
-  daemon agent integrations, bound plugin actions, editable native fonts, and
+  daemon agent integrations, plugin sidebar values and bound actions, editable
+  native fonts, and
   general configuration.
   A searchable installed-font picker can set all four families
   together or each independently (including Platform default), while sizes have

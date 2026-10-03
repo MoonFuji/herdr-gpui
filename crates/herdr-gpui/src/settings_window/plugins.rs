@@ -1,15 +1,20 @@
-//! Settings > Plugins: each host's bound plugin actions, run on explicit clicks.
+//! Settings > Plugins: what each host's plugins report, which of it the
+//! sidebar shows, and each host's bound plugin actions, run on explicit clicks.
 use super::*;
 use crate::{
-    plugins::{HostState, PluginAction, PluginHost},
+    config::SidebarScope,
+    plugins::{HostState, PluginAction, PluginHost, SidebarValue},
     search_input::{Changed, SearchInput},
 };
 
 /// What Herdr's endpoint cannot do yet, so the pane never implies otherwise.
-const LIMITS: &str = "Herdr lists plugin actions to this app only when a host binds them in its \
-config with a [[keys.command]] entry of type \"plugin_action\". Listing, enabling, or disabling \
-plugins, reading their logs, and running unbound actions are not offered to GUI clients yet; \
-use `herdr plugin` on that host for those. Nothing is installed from here.";
+const LIMITS: &str = "Herdr does not yet let this app list, enable, or disable plugins, read \
+their logs, or run actions that have no key binding; use `herdr plugin` on the host for those. \
+Nothing is installed from here.";
+
+const VALUES_NOTE: &str = "Plugins and hooks report these values for agents and workspaces. \
+Showing one adds it as its own row to [ui.sidebar] in your Herdr config, so the terminal app \
+shows it too.";
 
 /// A run the host's connection accepted into its queue; the daemon may still refuse it.
 #[derive(Debug, PartialEq, Eq)]
@@ -21,6 +26,9 @@ pub(super) struct Sent {
 pub(super) struct Plugins {
     search: Entity<SearchInput>,
     pub(super) status: Option<crate::Result<Sent>>,
+    /// Records sidebar edits instead of writing the shared config.
+    #[cfg(test)]
+    edits: Option<Vec<Edit>>,
     _search_changed: Subscription,
 }
 
@@ -28,7 +36,7 @@ impl Plugins {
     pub(super) fn new(cx: &mut Context<SettingsWindow>) -> Self {
         let search = cx.new(SearchInput::new);
         search.update(cx, |input, cx| {
-            input.set_placeholder("Search plugin actions by name or key...", cx)
+            input.set_placeholder("Search plugin values and actions...", cx)
         });
         let changed = cx.subscribe(&search, |this, _, _: &Changed, cx| {
             this.body_scroll.set_offset(Point::default());
@@ -37,6 +45,8 @@ impl Plugins {
         Self {
             search,
             status: None,
+            #[cfg(test)]
+            edits: None,
             _search_changed: changed,
         }
     }
@@ -45,6 +55,13 @@ impl Plugins {
         self.search.update(cx, |input, cx| {
             input.set_appearance(config.ui.clone(), theme.clone(), cx);
         });
+    }
+}
+
+fn scope_label(scope: SidebarScope) -> &'static str {
+    match scope {
+        SidebarScope::Agents => "Agents",
+        SidebarScope::Spaces => "Workspaces",
     }
 }
 
@@ -60,8 +77,7 @@ impl SettingsWindow {
             .flex_col()
             .gap(px(16.))
             .min_w_0()
-            .child(self.plugins.search.clone())
-            .child(self.control_note(LIMITS));
+            .child(self.plugins.search.clone());
         if let Some(status) = &self.plugins.status {
             let (text, color) = match status {
                 Ok(sent) => (
@@ -80,16 +96,137 @@ impl SettingsWindow {
         }
         let Some(hosts) = hosts else {
             return body.child(self.control_note(
-                "Open a session window to run plugin actions. Local preferences remain available.",
+                "Open a session window to see plugin output and actions. Local preferences remain available.",
             ));
         };
+        body = body.child(self.render_sidebar_values(&hosts, &query, cx));
         if hosts.is_empty() {
-            return body.child(self.control_note("No hosts are enabled."));
+            body = body.child(self.control_note("No hosts are enabled."));
         }
         for host in hosts {
             body = body.child(self.render_plugin_host(host, &query, cx));
         }
-        body
+        body.child(self.control_note(LIMITS))
+    }
+
+    /// The custom values hosts report and the agent status labels, each with a
+    /// switch that edits the shared `[ui.sidebar]` rows.
+    fn render_sidebar_values(
+        &self,
+        hosts: &[PluginHost],
+        query: &str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let ready = self.controls_shared_ready();
+        let layout = &self.config.sidebar_layout;
+        let mut card = self
+            .control_card("Sidebar values")
+            .child(self.control_note(VALUES_NOTE));
+        if !ready {
+            card = card.child(self.control_note(if !cfg!(unix) {
+                "Shared Herdr settings are read-only on this platform."
+            } else if self.shared.is_none() {
+                "Shared settings are unavailable. Reload from General to retry."
+            } else {
+                "Waiting for Settings to finish loading or saving."
+            }));
+        }
+        let labelled: usize = hosts.iter().map(|host| host.output.labelled_agents).sum();
+        let label_sample = hosts
+            .iter()
+            .find_map(|host| host.output.label_sample.as_deref());
+        let status = "state_text";
+        if query.is_empty() || "status labels".contains(query) {
+            let detail = match label_sample {
+                Some(sample) => format!(
+                    "{labelled} agent{} name their own status, such as \u{201c}{sample}\u{201d}.",
+                    if labelled == 1 { "" } else { "s" }
+                ),
+                None => "Idle, working, blocked, or done, or an integration's own words.".into(),
+            };
+            card = card.child(self.sidebar_value_switch(
+                SidebarScope::Agents,
+                status,
+                "Agent status labels".into(),
+                detail,
+                layout.shows(SidebarScope::Agents, status),
+                ready,
+                cx,
+            ));
+        }
+        let values: Vec<SidebarValue> = crate::plugins::sidebar_values(hosts, layout)
+            .into_iter()
+            .filter(|value| value.matches(query))
+            .collect();
+        if values.is_empty() {
+            return card.child(self.control_note(if query.is_empty() {
+                "No plugin or hook reports custom values on a connected host yet."
+            } else {
+                "No matching values."
+            }));
+        }
+        for value in values {
+            let detail = match &value.sample {
+                Some(sample) => format!(
+                    "{} \u{b7} \u{201c}{sample}\u{201d} on {}",
+                    scope_label(value.scope),
+                    value.hosts.join(", ")
+                ),
+                None => format!(
+                    "{} \u{b7} not reported on a connected host",
+                    scope_label(value.scope)
+                ),
+            };
+            card = card.child(self.sidebar_value_switch(
+                value.scope,
+                &value.token(),
+                value.token(),
+                detail,
+                value.shown,
+                ready,
+                cx,
+            ));
+        }
+        card
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sidebar_value_switch(
+        &self,
+        scope: SidebarScope,
+        token: &str,
+        title: String,
+        detail: String,
+        shown: bool,
+        ready: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let label = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(self.control_note(detail));
+        let id = format!("plugin-value-{}-{token}", scope.key());
+        let switch = self.control_switch(id, label, shown, ready);
+        if !ready {
+            return switch;
+        }
+        let token = token.to_owned();
+        switch.on_click(cx.listener(move |this, _, _, cx| {
+            let edit = Edit::SidebarToken {
+                scope,
+                token: token.clone(),
+                shown: !shown,
+            };
+            #[cfg(test)]
+            if let Some(edits) = &mut this.plugins.edits {
+                edits.push(edit);
+                return;
+            }
+            this.save_shared(edit, cx);
+        }))
     }
 
     fn render_plugin_host(&self, host: PluginHost, query: &str, cx: &mut Context<Self>) -> Div {
@@ -106,6 +243,11 @@ impl SettingsWindow {
                 );
             }
             HostState::Disconnected => return card.child(self.control_note("Not connected.")),
+        }
+        if let Some(view) = &host.output.agent_view {
+            card = card.child(self.control_note(format!(
+                "The agent panel shows the \u{201c}{view}\u{201d} view a plugin chose."
+            )));
         }
         if host.actions.is_empty() {
             return card.child(self.control_note("No plugin actions are bound on this host."));
@@ -287,8 +429,105 @@ mod tests {
             ),
         );
         view.endpoints.extend([remote, offline, disabled]);
+        // Plugin output: a summary on both hosts' agents, a workspace value
+        // and status labels locally, and an agent view on the remote.
+        let report = |live: &mut crate::state::LiveState, workspace: bool| {
+            let snapshot = Arc::make_mut(live.snapshot.as_mut().unwrap());
+            for agent in &mut snapshot.agents {
+                agent.tokens = vec![("summary".into(), "fix auth".into())];
+                agent.state_labels = vec![("working".into(), "deep in the mines".into())];
+            }
+            for space in &mut snapshot.workspaces {
+                space.tokens = if workspace {
+                    vec![("ci".into(), "green".into())]
+                } else {
+                    Vec::new()
+                };
+            }
+            snapshot.agent_view_label = (!workspace).then(|| "review".into());
+        };
+        report(&mut view.live, true);
+        report(&mut view.endpoints[1].live, false);
         view.activation_deadline = Some(std::time::Instant::now());
         view
+    }
+
+    #[gpui::test]
+    fn sidebar_values_toggle_shared_rows_and_follow_search(cx: &mut TestAppContext) {
+        let main = cx.add_window(hosts);
+        let weak = cx.update(|cx| main.update(cx, |_, _, cx| cx.weak_entity()).unwrap());
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let mut view = SettingsWindow::new(weak, cx);
+            view.section = Section::Plugins;
+            view.config.sidebar_layout = crate::config::SidebarLayout::from_daemon_config(
+                &"[ui.sidebar.agents]\nrows = [[\"agent\"], [\"$old\"]]\n"
+                    .parse()
+                    .unwrap(),
+            )
+            .unwrap();
+            view.plugins.edits = Some(Vec::new());
+            view
+        });
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        };
+        let click = |cx: &mut VisualTestContext, id: &'static str| {
+            draw(cx);
+            let bounds = cx.debug_bounds(id).unwrap();
+            cx.simulate_click(bounds.center(), Default::default());
+            cx.run_until_parked();
+        };
+        // Without shared settings the switches are inert.
+        click(cx, "plugin-value-agents-$summary");
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.plugins.edits.as_ref().unwrap().len(), 0);
+        });
+        view.update(cx, |view, cx| {
+            view.shared = Some(herdr_settings::Settings::parse_text("").unwrap());
+            cx.notify();
+        });
+        for id in [
+            "plugin-value-agents-$summary",
+            "plugin-value-agents-$old",
+            "plugin-value-agents-state_text",
+            "plugin-value-spaces-$ci",
+        ] {
+            click(cx, id);
+        }
+        view.read_with(cx, |view, _| {
+            let edits: Vec<_> = view
+                .plugins
+                .edits
+                .iter()
+                .flatten()
+                .map(|edit| match edit {
+                    Edit::SidebarToken {
+                        scope,
+                        token,
+                        shown,
+                    } => (*scope, token.as_str(), *shown),
+                    other => panic!("unexpected edit {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                edits,
+                [
+                    (SidebarScope::Agents, "$summary", true),
+                    (SidebarScope::Agents, "$old", false),
+                    (SidebarScope::Agents, "state_text", true),
+                    (SidebarScope::Spaces, "$ci", true),
+                ]
+            );
+        });
+        view.update(cx, |view, cx| {
+            view.plugins.search.update(cx, |input, cx| {
+                input.set_text_selected("GREEN", cx);
+            });
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("plugin-value-spaces-$ci").is_some());
+        assert!(cx.debug_bounds("plugin-value-agents-$summary").is_none());
+        assert!(cx.debug_bounds("plugin-value-agents-state_text").is_none());
     }
 
     #[gpui::test]
