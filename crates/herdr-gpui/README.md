@@ -1183,11 +1183,17 @@ the same tab. Splitting opens nothing new.
   is what is saved.
 - Closing in a group only takes tabs out of that group's strip, as an
   editor's groups do: they stay open in Herdr, in the browser, and in every
-  other group. Split, a tab's close button does this; **…** offers **Close**,
+  other group. Split, a tab's close button and its right-click **Close Tab**
+  do this; **…** offers **Close**,
   **Close Others**, and **Close All**, which closes the group. A group left
   with no tabs closes, and a tab closed in every group stays in the group in
-  use. Unsplit, a tab's close button closes it in Herdr, through its
-  confirmation, as before; nothing in **…** ever closes a Herdr tab.
+  use. Unsplit, a tab's close button and **Close Tab** close it in Herdr,
+  through its confirmation, as before; nothing in **…** ever closes a Herdr
+  tab.
+- Right-click a tab for **New Tab** (opening in that group), **Rename**, and
+  **Close Tab**, as in Herdr's own tab menu. A zoomed tab, where one pane
+  fills the tab, shows a corner mark after its title, and the pane menu
+  offers **Zoom** or **Unzoom** to match.
 - **…** also offers **New Browser Tab** and **Split Right**.
 - A split's new group opens from the right, sliding in at its own width
   while the group it came from gives up the room; a closed group folds away
@@ -1892,8 +1898,11 @@ GPUI native action/menu/keybinding patterns.
   server-owned keybindings, session picker, saved-host editing, or daemon
   stop/upgrade management.
 - IME uses a minimal transient buffer, not a local editable terminal document;
-  composition appears in the status bar rather than inline. Key releases and
-  physical-key/extended keyboard protocol metadata are not reported.
+  composition appears in the status bar rather than inline. Key releases are
+  reported only while Herdr says the focused pane asks for every key (kitty
+  report-all), and only for keys sent as key events: typed text still arrives
+  as text rather than escape codes, so IME and dead keys keep working.
+  Physical-key metadata is not reported.
 - Popups have a basic centered text presentation, without native title/border
   chrome. Only semantic notifications get in-app toasts; legacy notification
   commands and server clipboard writes are not executed. There is no notification

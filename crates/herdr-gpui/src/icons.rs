@@ -153,6 +153,7 @@ impl AssetSource for Icons {
             "icons/external.svg" => include_bytes!("../../../assets/icons/external.svg"),
             "icons/split.svg" => include_bytes!("../../../assets/icons/split.svg"),
             "icons/more.svg" => include_bytes!("../../../assets/icons/more.svg"),
+            "icons/zoom.svg" => include_bytes!("../../../assets/icons/zoom.svg"),
             _ => match crate::usage::icon(path) {
                 Some(bytes) => bytes,
                 None => return Ok(None),
@@ -193,6 +194,7 @@ impl AssetSource for Icons {
             "icons/external.svg",
             "icons/split.svg",
             "icons/more.svg",
+            "icons/zoom.svg",
         ]
         .into_iter()
         .chain(AgentIcon::ALL.iter().map(|icon| icon.path()))
