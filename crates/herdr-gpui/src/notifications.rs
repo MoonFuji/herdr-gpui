@@ -13,6 +13,7 @@ const GRACE: Duration = Duration::from_secs(1);
 const RECHECK: Duration = Duration::from_millis(50);
 static ARRIVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+pub(crate) mod phone;
 #[cfg(test)]
 mod policy_tests;
 
@@ -40,6 +41,11 @@ pub(crate) struct Notice {
     /// Handed to the OS notification center. Retained only so a click can
     /// resolve its target through the same boot-fenced validation as a toast.
     pub(crate) posted: bool,
+    /// Passed the policy for the phone and waits for [`take_phone`].
+    push: bool,
+    /// Kept only for the phone: delivery is off, or the in-app or OS
+    /// presentation suppressed it. Removed once [`take_phone`] takes it.
+    phone_only: bool,
 }
 
 pub(crate) fn safe_text(text: &str, limit: usize) -> String {
@@ -116,6 +122,8 @@ impl Notice {
             displayed: None,
             suppression_target,
             posted: false,
+            push: false,
+            phone_only: false,
         }
     }
 
@@ -269,13 +277,17 @@ pub(crate) fn tick(
         let snapshot = endpoint.live.snapshot.as_deref();
         endpoint.toasts.entries.retain_mut(|(id, n)| {
             let keep = (|| {
+                let phone = !n.client_local && config.phone.wants(n.kind);
                 if !n.client_local
-                    && (delivery == Delivery::Off
+                    && ((delivery == Delivery::Off && !phone)
                         || endpoint
                             .toasts
                             .enabled_since
                             .is_some_and(|cutoff| n.arrived <= cutoff))
                 {
+                    return false;
+                }
+                if n.phone_only && !phone {
                     return false;
                 }
                 if !n.explicit_position {
@@ -341,7 +353,7 @@ pub(crate) fn tick(
                             return false;
                         }
                     }
-                    if index == selected
+                    let suppressed = index == selected
                         && (!system || focused)
                         && snapshot.is_some_and(|s| match n.suppression_target.as_ref() {
                             Some(NavigationTarget::Tab(tab)) => {
@@ -351,10 +363,15 @@ pub(crate) fn tick(
                                 s.focused_workspace_id.as_ref() == Some(w)
                             }
                             _ => false,
-                        })
-                    {
+                        });
+                    let shown = delivery != Delivery::Off && !suppressed;
+                    // The phone is for when the user is away: it pushes only
+                    // while this window is unfocused, active tab included.
+                    n.push = phone && !focused;
+                    if !shown && !n.push {
                         return false;
                     }
+                    n.phone_only = !shown;
                 }
                 n.ready = true;
                 true
@@ -373,7 +390,11 @@ pub(crate) fn tick(
                     .entries
                     .iter()
                     .filter(move |(_, n)| {
-                        n.ready == ready && !n.visible && !n.posted && (n.client_local || !system)
+                        n.ready == ready
+                            && !n.visible
+                            && !n.posted
+                            && !n.phone_only
+                            && (n.client_local || !system)
                     })
                     .map(move |(id, n)| (n.arrived, n.order, index, *id))
             })
@@ -430,21 +451,16 @@ pub(crate) fn take_system(
     let mut posts = Vec::new();
     for (index, endpoint) in endpoints.iter_mut().enumerate() {
         for (id, n) in &mut endpoint.toasts.entries {
-            if !n.ready || n.posted || n.visible || n.client_local {
+            if !n.ready || n.posted || n.visible || n.client_local || n.phone_only {
                 continue;
             }
             n.posted = true;
-            let boot = n.boot.as_deref().unwrap_or_default();
-            let tag = match &n.pane_id {
-                Some(pane) => format!("herdr:{}:{boot}:{pane}", endpoint.id),
-                None => format!("herdr:{}:{boot}:#{}", endpoint.id, n.order),
-            };
             posts.push((
                 (n.arrived, n.order),
                 SystemPost {
                     endpoint: index,
                     id: *id,
-                    tag,
+                    tag: n.tag(&endpoint.id),
                     title: n.title.clone(),
                     body: n.body.clone(),
                 },
@@ -463,6 +479,62 @@ pub(crate) fn take_system(
             excess -= usize::from(drop);
             !drop
         });
+    }
+    posts.sort_unstable_by_key(|(key, _)| *key);
+    posts.into_iter().map(|(_, post)| post).collect()
+}
+
+impl Notice {
+    /// Stable per host, boot, and pane, so a newer event replaces the older
+    /// one where the platform supports it, as Herdr's TUI does.
+    fn tag(&self, endpoint: &str) -> String {
+        let boot = self.boot.as_deref().unwrap_or_default();
+        match &self.pane_id {
+            Some(pane) => format!("herdr:{endpoint}:{boot}:{pane}"),
+            None => format!("herdr:{endpoint}:{boot}:#{}", self.order),
+        }
+    }
+}
+
+/// A notice [`tick`] cleared for the phone, already sanitized by
+/// [`Notice::new`]; [`phone::Message`] bounds it further.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PhonePost {
+    pub endpoint: usize,
+    pub tag: String,
+    pub event: phone::Event,
+    pub title: String,
+    pub body: Option<String>,
+}
+
+/// Takes every notice [`tick`] cleared for the phone, in global arrival
+/// order, and drops the ones kept only for it. Like [`take_system`], call it
+/// only from the poll loop.
+pub(crate) fn take_phone(
+    endpoints: &mut [crate::endpoint::Endpoint],
+    events: phone::PhoneEvents,
+) -> Vec<PhonePost> {
+    let mut posts = Vec::new();
+    for (index, endpoint) in endpoints.iter_mut().enumerate() {
+        for (_, n) in &mut endpoint.toasts.entries {
+            if !std::mem::take(&mut n.push) || !events.wants(n.kind) {
+                continue;
+            }
+            let Some(event) = phone::Event::from_kind(n.kind) else {
+                continue;
+            };
+            posts.push((
+                (n.arrived, n.order),
+                PhonePost {
+                    endpoint: index,
+                    tag: n.tag(&endpoint.id),
+                    event,
+                    title: n.title.clone(),
+                    body: n.body.clone(),
+                },
+            ));
+        }
+        endpoint.toasts.entries.retain(|(_, n)| !n.phone_only);
     }
     posts.sort_unstable_by_key(|(key, _)| *key);
     posts.into_iter().map(|(_, post)| post).collect()

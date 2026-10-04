@@ -222,6 +222,7 @@ pub(crate) fn run() -> std::process::ExitCode {
             if mode == LaunchMode::Normal {
                 crate::control::install(cx);
                 crate::window::system_notifications::install(cx);
+                crate::notifications::phone::install(cx);
             }
             cx.set_global(appearance);
             app_icon::install();

@@ -109,6 +109,8 @@ pub struct Config {
     pub features: Features,
     pub notifications: NotificationConfig,
     pub(crate) notification_overrides: NotificationSettings,
+    /// `[phone]`: forwarding agent notices to ntfy or Pushover.
+    pub phone: crate::notifications::phone::PhoneConfig,
     pub clipboard_toast: ClipboardToast,
     pub bell: BellConfig,
     pub layout: Layout,
@@ -288,6 +290,10 @@ pub struct NotificationConfig {
     #[serde(deserialize_with = "notification_delay")]
     pub delay_seconds: u64,
     pub position: herdr_client::protocol::ToastHerdrPosition,
+    /// What `[phone]` forwards, kept here so the shared policy can clear a
+    /// notice for the phone without seeing any secret.
+    #[serde(skip)]
+    pub phone: crate::notifications::phone::PhoneEvents,
 }
 
 impl Default for NotificationConfig {
@@ -297,6 +303,7 @@ impl Default for NotificationConfig {
             system: false,
             delay_seconds: 1,
             position: herdr_client::protocol::ToastHerdrPosition::BottomRight,
+            phone: Default::default(),
         }
     }
 }
@@ -338,6 +345,7 @@ impl NotificationSettings {
             system: base.system,
             delay_seconds: self.delay_seconds.unwrap_or(base.delay_seconds),
             position: self.position.unwrap_or(base.position),
+            phone: base.phone,
         }
     }
 }
@@ -745,6 +753,7 @@ impl Default for Config {
             features: Features::default(),
             notifications: NotificationConfig::default(),
             notification_overrides: NotificationSettings::default(),
+            phone: Default::default(),
             clipboard_toast: ClipboardToast::default(),
             bell: BellConfig::default(),
             layout: Layout::default(),
@@ -783,6 +792,7 @@ struct Settings {
     github: GitHubConfig,
     features: Features,
     notifications: NotificationSettings,
+    phone: crate::notifications::phone::PhoneConfig,
     clipboard_toast: ClipboardToastSettings,
     bell: BellConfig,
     layout: Layout,
@@ -968,6 +978,7 @@ impl Config {
             system: shared.toast_delivery == crate::herdr_settings::ToastDelivery::System,
             delay_seconds: shared.toast_delay_seconds,
             position: shared.toast_position,
+            phone: self.notifications.phone,
         });
     }
 
@@ -1204,9 +1215,12 @@ impl Config {
         config.github = settings.github;
         config.features = settings.features;
         config.notification_overrides = settings.notifications;
-        config.notifications = settings
-            .notifications
-            .resolve(NotificationConfig::default());
+        settings.phone.validate()?;
+        config.notifications = settings.notifications.resolve(NotificationConfig {
+            phone: settings.phone.events(),
+            ..NotificationConfig::default()
+        });
+        config.phone = settings.phone;
         config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
         config.bell = settings.bell;
         config.sidebar_layout = base.sidebar_layout.clone();
@@ -2008,7 +2022,8 @@ mod tests {
                         enabled,
                         system,
                         delay_seconds: 7,
-                        position: ToastHerdrPosition::TopLeft
+                        position: ToastHerdrPosition::TopLeft,
+                        phone: Default::default(),
                     }
                 );
                 for (font, original) in [
@@ -2066,7 +2081,8 @@ mod tests {
                         enabled,
                         system: false,
                         delay_seconds,
-                        position
+                        position,
+                        phone: Default::default(),
                     },
                     "{text}"
                 );
@@ -2153,6 +2169,43 @@ mod tests {
                 PathBuf::from(expected)
             );
         }
+    }
+
+    #[test]
+    fn phone_settings_feed_the_notification_policy_and_survive_shared_reloads() -> anyhow::Result<()>
+    {
+        use crate::herdr_settings::Settings as Shared;
+        use crate::notifications::phone::PhoneEvents;
+
+        assert_eq!(
+            Config::parse("")?.notifications.phone,
+            PhoneEvents::default()
+        );
+        // Opting in without a service forwards nothing.
+        assert_eq!(
+            Config::parse("[phone]\nenabled = true")?
+                .notifications
+                .phone,
+            PhoneEvents::default()
+        );
+        let mut config = Config::parse(
+            "[phone]\nenabled = true\ndone = false\n[phone.ntfy]\ntopic = 'herdr-x'",
+        )?;
+        let expected = PhoneEvents {
+            blocked: true,
+            done: false,
+        };
+        assert_eq!(config.notifications.phone, expected);
+        config.apply_shared_notifications(&Shared::parse_text("")?);
+        assert_eq!(config.notifications.phone, expected);
+        for text in [
+            "[phone.ntfy]\ntopic = 'has space'",
+            "[phone.ntfy]\nserver = 'ftp://x'",
+            "[phone]\nunknown = 1",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        Ok(())
     }
 
     #[test]
@@ -2470,7 +2523,8 @@ mod tests {
                         enabled: true,
                         system: false,
                         delay_seconds: delay,
-                        position
+                        position,
+                        phone: Default::default(),
                     }
                 );
             }
