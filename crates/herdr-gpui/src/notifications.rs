@@ -15,6 +15,8 @@ static ARRIVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 
 pub(crate) mod phone;
 #[cfg(test)]
+mod phone_policy_tests;
+#[cfg(test)]
 mod policy_tests;
 
 #[derive(Clone)]
