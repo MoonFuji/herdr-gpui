@@ -1,0 +1,19 @@
+[package]
+description            = "Companion bridge that lets a phone answer Claude Code prompts for agents running in Herdr"
+edition.workspace      = true
+license.workspace      = true
+name                   = "herdr-companion"
+publish.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace       = true
+herdr-client.workspace = true
+secrecy.workspace      = true
+serde.workspace        = true
+serde_json.workspace   = true
+thiserror.workspace    = true

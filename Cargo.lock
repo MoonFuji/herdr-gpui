@@ -3410,6 +3410,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "herdr-companion"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "herdr-client",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "herdr-gpui"
 version = "0.1.0"
 dependencies = [

@@ -1,5 +1,5 @@
 [workspace]
-members  = ["crates/herdr-client", "crates/herdr-gpui", "crates/herdr-protocol"]
+members  = ["crates/herdr-client", "crates/herdr-companion", "crates/herdr-gpui", "crates/herdr-protocol"]
 resolver = "2"
 
 [workspace.package]
