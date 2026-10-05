@@ -738,6 +738,10 @@ impl HerdrWindow {
             .flex()
             .flex_col()
             .gap(px(12.));
+        let removing = matches!(
+            (&wizard.choice, &wizard.account),
+            (Some(Choice::Existing(id)), Some(account)) if account.saved.contains(id)
+        );
         let text = |text: String| div().flex_none().text_color(rgb(theme.muted)).child(text);
         body = match wizard.phase {
             Phase::Checking | Phase::Loading => body.child(text("Checking your Coder account…".into())),
@@ -748,15 +752,18 @@ impl HerdrWindow {
             Phase::SigningIn => body,
             Phase::Choose => body
                 .child(self.render_coder_choices(wizard, cx))
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .child("Label")
-                        .child(wizard.label.clone()),
-                ),
+                // Removing a saved device names nothing new.
+                .when(!removing, |body| {
+                    body.child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child("Label")
+                            .child(wizard.label.clone()),
+                    )
+                }),
             Phase::Working | Phase::Installing => body,
             Phase::NeedsInstall => body.child(text(format!(
                 "Herdr is not installed in {}. Herdr can run its official installer there (curl -fsSL https://herdr.dev/install.sh | sh), which verifies the release checksum and installs to ~/.local/bin.",
@@ -783,14 +790,7 @@ impl HerdrWindow {
             Phase::SigningIn => ("Waiting for browser…", false),
             Phase::Choose => (
                 match &wizard.choice {
-                    Some(Choice::Existing(id))
-                        if wizard
-                            .account
-                            .as_ref()
-                            .is_some_and(|account| account.saved.contains(id)) =>
-                    {
-                        "Remove device"
-                    }
+                    _ if removing => "Remove device",
                     Some(Choice::Existing(_)) => "Add workspace",
                     _ => "Create workspace",
                 },
@@ -800,7 +800,8 @@ impl HerdrWindow {
             Phase::NeedsInstall => ("Install Herdr", true),
             Phase::Installing => ("Installing…", false),
             Phase::Checking | Phase::Loading | Phase::Working => ("Working…", false),
-            Phase::Done => ("Done", false),
+            // Done closes the dialog, so it reads as enabled.
+            Phase::Done => ("Done", true),
         };
         div()
             .debug_selector(|| "coder-setup-dialog".into())
