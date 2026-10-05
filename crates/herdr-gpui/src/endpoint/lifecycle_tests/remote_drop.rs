@@ -137,3 +137,14 @@ fn a_drop_seen_before_its_state_arrives_does_not_fall_back_to_local(cx: &mut gpu
         assert!(view.activation_deadline.unwrap() > Instant::now());
     });
 }
+
+#[test]
+fn a_stopped_handle_reads_as_reconnecting_before_its_state_arrives() {
+    let (mut endpoint, _server) = connected_endpoint("ssh:remote");
+    // A stopped handle delivers no disconnect state at all.
+    endpoint.connection.handle.as_ref().unwrap().disconnect();
+    endpoint.poll(Instant::now());
+    assert!(endpoint.live.status.is_connected(), "the gap under test");
+    assert_eq!(endpoint.outage(), Some("connection lost"));
+    assert_eq!(endpoint.status(), "reconnecting");
+}

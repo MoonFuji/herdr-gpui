@@ -336,9 +336,12 @@ impl Endpoint {
             "disabled"
         } else if self.detached {
             "detached"
+        } else if self.outage.is_some() {
+            // Before `live`: a stopped handle can precede its disconnect state.
+            "reconnecting"
         } else if self.live.status.is_connected() {
             "online"
-        } else if self.outage.is_some() || self.live.error.is_some() {
+        } else if self.live.error.is_some() {
             "reconnecting"
         } else {
             "connecting"
