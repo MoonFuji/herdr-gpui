@@ -222,7 +222,9 @@ size = 12
 # allow_plaintext_credentials = false
 
 # A Coder deployment whose workspaces can be created and added as devices from
-# the device picker's "Add Coder Workspace…". Register an OAuth2 app in Coder
+# the device picker's "Add Coder Workspace…". Settings > Cloud Devices edits
+# these keys and saves the client secret to the credential store, so editing
+# this table by hand is optional. Register an OAuth2 app in Coder
 # (the deployment must enable the `oauth2` experiment) with the redirect URI
 # below; Coder compares it as an exact string, so copy it verbatim. Requires the
 # `coder` CLI, which carries the connection. Each HERDR_CODER_URL,
@@ -231,8 +233,9 @@ size = 12
 # [coder]
 # url = "https://coder.example.com"
 # oauth_client_id = "YOUR_OAUTH2_APP_ID"
-# Coder requires a confidential client. Prefer the environment variable; the
-# secret identifies this app to Coder, it is not your account password.
+# Coder requires a confidential client. Prefer Settings > Cloud Devices, which
+# keeps the secret out of this file; when set here or in the environment, this
+# value takes precedence. It identifies this app to Coder, not your account.
 # oauth_client_secret = "YOUR_OAUTH2_APP_SECRET"
 # A loopback address with an explicit port the GUI can listen on while signing in.
 # oauth_redirect_uri = "http://127.0.0.1:47823/callback"

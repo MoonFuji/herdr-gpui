@@ -109,9 +109,9 @@ pub(crate) fn account(settings: &Settings) -> Result<Account> {
     .map(|account| Account { saved, ..account })
 }
 
-/// Forget a saved device; the workspace itself is left untouched in Coder.
+/// Forget a saved device and list the account again.
 pub(crate) fn forget(settings: &Settings, id: &str) -> Result<Account> {
-    catalog::remove(id)?;
+    forget_device(id)?;
     account(settings)
 }
 
@@ -198,4 +198,66 @@ pub(crate) fn save(
     };
     catalog::save(workspace.clone())?;
     Ok(workspace)
+}
+
+/// The sign-in as Settings shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Session {
+    SignedOut,
+    SignedIn {
+        user: String,
+    },
+    /// A sign-in is saved but the account could not be read; `reason` is why.
+    Unreadable {
+        reason: String,
+    },
+}
+
+/// What the Settings section shows about a deployment.
+#[derive(Clone, Debug)]
+pub(crate) struct Overview {
+    pub(crate) session: Session,
+    /// Whether a client secret is saved from Settings.
+    pub(crate) secret_saved: bool,
+    /// This deployment's saved devices.
+    pub(crate) devices: Vec<SavedWorkspace>,
+}
+
+pub(crate) fn overview(settings: &Settings) -> Result<Overview> {
+    let devices = catalog::load()?
+        .into_iter()
+        .filter(|saved| saved.deployment == settings.base)
+        .collect();
+    let secret_saved = store::client_secret(settings)?.is_some();
+    let session = if store::signed_in(settings)? {
+        match store::with_token(&tokens(settings), |token| Client::new(settings, token).me()) {
+            Ok(user) => Session::SignedIn {
+                user: user.username,
+            },
+            Err(Error::Authentication) => Session::SignedOut,
+            Err(error) => Session::Unreadable {
+                reason: error.to_string(),
+            },
+        }
+    } else {
+        Session::SignedOut
+    };
+    Ok(Overview {
+        session,
+        secret_saved,
+        devices,
+    })
+}
+
+/// Forget one saved device; its workspace is left untouched in Coder.
+pub(crate) fn forget_device(id: &str) -> Result<()> {
+    catalog::remove(id)
+}
+
+/// Save (or with `None`, forget) the OAuth client secret typed into Settings.
+pub(crate) fn save_client_secret(
+    store: crate::github::Store,
+    secret: Option<&SecretString>,
+) -> Result<()> {
+    store::save_client_secret(store, secret)
 }

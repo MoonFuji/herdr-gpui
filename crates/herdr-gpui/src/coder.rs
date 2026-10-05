@@ -14,6 +14,7 @@ mod settings;
 pub(crate) mod setup;
 mod store;
 mod token;
+pub(crate) mod worker;
 
 pub use error::{Error, Status};
 pub(crate) use {

@@ -74,7 +74,7 @@ fn authorize_url_carries_pkce_state_and_the_exact_redirect() {
     );
     assert_eq!(pairs["state"], pending.state);
     assert!(!pending.url.contains(pending.pkce.verifier.expose_secret()));
-    assert!(!pending.url.contains(settings.client_secret.expose_secret()));
+    assert!(!pending.url.contains("secret-fixture"));
 }
 
 #[test]

@@ -20,7 +20,10 @@ pub(crate) struct Settings {
     /// Deployment root without a trailing slash, e.g. `https://coder.example.com`.
     pub(crate) base: String,
     pub(crate) client_id: String,
-    pub(crate) client_secret: SecretString,
+    /// From `HERDR_CODER_OAUTH_CLIENT_SECRET` or `[coder] oauth_client_secret`;
+    /// `None` means the one saved from Settings, read only when needed because
+    /// the credential store blocks. See [`Settings::client_secret`].
+    pub(crate) client_secret: Option<SecretString>,
     pub(crate) redirect: Redirect,
     pub(crate) organization: Option<String>,
     pub(crate) workspace_prefix: String,
@@ -62,19 +65,19 @@ impl Settings {
             return Err(Error::Field("coder.oauth_client_id"));
         }
         let client_secret = match var("HERDR_CODER_OAUTH_CLIENT_SECRET") {
-            Some(value) => {
+            Some(value) => Some({
                 // Own and wipe the copy, even when it is not valid UTF-8.
                 let bytes = zeroize::Zeroizing::new(value.into_encoded_bytes());
                 std::str::from_utf8(&bytes)
                     .map(SecretString::from)
                     .map_err(|_| Error::Encoding("HERDR_CODER_OAUTH_CLIENT_SECRET"))?
-            }
-            None => config
-                .oauth_client_secret
-                .clone()
-                .ok_or(Error::Missing("oauth_client_secret"))?,
+            }),
+            None => config.oauth_client_secret.clone(),
         };
-        if !super::token::valid(client_secret.expose_secret()) {
+        if client_secret
+            .as_ref()
+            .is_some_and(|secret| !super::token::valid(secret.expose_secret()))
+        {
             return Err(Error::Field("coder.oauth_client_secret"));
         }
         let redirect = redirect(
@@ -109,6 +112,15 @@ impl Settings {
             workspace_prefix,
             store: Store::for_policy(config.allow_plaintext_credentials),
         }))
+    }
+
+    /// The OAuth client secret: the configured one, else the one saved from
+    /// Settings. Blocks on the credential store; call from a worker.
+    pub(crate) fn client_secret(&self) -> Result<SecretString> {
+        match &self.client_secret {
+            Some(secret) => Ok(secret.clone()),
+            None => super::store::client_secret(self)?.ok_or(Error::Missing("oauth_client_secret")),
+        }
     }
 
     /// `path` must start with `/`; it is appended to the deployment root.

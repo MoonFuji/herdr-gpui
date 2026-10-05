@@ -7,7 +7,7 @@ pub(crate) fn settings() -> Settings {
     Settings {
         base: "https://coder.example.com".into(),
         client_id: "client-fixture".into(),
-        client_secret: "secret-fixture".into(),
+        client_secret: Some("secret-fixture".into()),
         redirect: Redirect {
             uri: "http://127.0.0.1:47823/callback".into(),
             path: "/callback".into(),

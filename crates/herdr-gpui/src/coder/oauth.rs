@@ -267,6 +267,7 @@ pub(super) fn exchange(
     code: &SecretString,
     verifier: &SecretString,
 ) -> Result<token::Credential> {
+    let secret = settings.client_secret()?;
     let reply = http::form(
         "oauth2_token",
         &settings.endpoint("/oauth2/tokens"),
@@ -275,7 +276,7 @@ pub(super) fn exchange(
             ("code", code.expose_secret()),
             ("redirect_uri", &settings.redirect.uri),
             ("client_id", &settings.client_id),
-            ("client_secret", settings.client_secret.expose_secret()),
+            ("client_secret", secret.expose_secret()),
             ("code_verifier", verifier.expose_secret()),
         ],
     )?;
@@ -287,6 +288,7 @@ pub(super) fn exchange(
 pub(crate) fn refresh(settings: &Settings, saved: &token::Credential) -> Result<token::Credential> {
     let refresh = saved.refresh_token.as_ref().ok_or(Error::Authentication)?;
     tracing::info!(category = "coder_refresh", "Renewing saved Coder sign-in");
+    let secret = settings.client_secret()?;
     let reply = http::form(
         "oauth2_refresh",
         &settings.endpoint("/oauth2/tokens"),
@@ -294,7 +296,7 @@ pub(crate) fn refresh(settings: &Settings, saved: &token::Credential) -> Result<
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh.expose_secret()),
             ("client_id", &settings.client_id),
-            ("client_secret", settings.client_secret.expose_secret()),
+            ("client_secret", secret.expose_secret()),
         ],
     )
     .map_err(|error| match error {

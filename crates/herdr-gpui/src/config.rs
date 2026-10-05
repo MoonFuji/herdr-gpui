@@ -18,6 +18,7 @@ mod theme;
 pub(crate) mod watch;
 
 pub use coder::CoderConfig;
+pub(crate) use coder::CoderFields;
 use files::write_config;
 pub(crate) use fonts::FontFace;
 use fonts::FontSettings;

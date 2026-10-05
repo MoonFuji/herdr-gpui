@@ -11,7 +11,7 @@ pub enum Error {
     Field(&'static str),
     #[error("{0} must be UTF-8.")]
     Encoding(&'static str),
-    #[error("[coder] needs {0}. Set it in the GUI config or its HERDR_CODER_* variable.")]
+    #[error("Coder needs {0}. Set it in Settings > Cloud Devices.")]
     Missing(&'static str),
     #[error("Coder sign-in required.")]
     Authentication,

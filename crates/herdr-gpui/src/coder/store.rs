@@ -4,7 +4,7 @@
 
 use super::{Error, Result, Settings, oauth, token::Credential};
 use crate::github::{Entry, read_entry, save_entry};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use std::time::SystemTime;
 
 const ENTRY: Entry = Entry {
@@ -19,6 +19,35 @@ const ENTRY: Entry = Entry {
             .map_err(crate::Error::from)
     },
 };
+
+/// The OAuth client secret typed into Settings. Coder requires a confidential
+/// client, so the secret is a credential like the sign-in, kept the same way.
+const CLIENT_SECRET: Entry = Entry {
+    service: "dev.herdr.gpui.coder",
+    account: "oauth-client-secret",
+    label: "Herdr GPUI Coder OAuth client secret",
+    file: c"coder-client-secret",
+    validate: |value| {
+        if super::token::valid(value.expose_secret()) {
+            Ok(())
+        } else {
+            Err(Error::Field("coder.oauth_client_secret").into())
+        }
+    },
+};
+
+/// The client secret saved from Settings, if any. Blocks; call from a worker.
+pub(crate) fn client_secret(settings: &Settings) -> Result<Option<SecretString>> {
+    read_entry(settings.store, &CLIENT_SECRET).map_err(storage)
+}
+
+/// Save or, with `None`, forget the client secret. Blocks; call from a worker.
+pub(crate) fn save_client_secret(
+    store: crate::github::Store,
+    secret: Option<&SecretString>,
+) -> Result<()> {
+    save_entry(store, &CLIENT_SECRET, secret).map_err(storage)
+}
 
 // A refresh token is single-use; a second worker renewing with it would sign
 // the user out. Only background workers call this; never on the UI thread.

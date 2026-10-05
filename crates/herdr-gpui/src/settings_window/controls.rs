@@ -322,7 +322,7 @@ impl SettingsWindow {
         }
     }
 
-    fn control_card(&self, title: &'static str) -> Div {
+    pub(super) fn control_card(&self, title: &'static str) -> Div {
         div()
             .flex()
             .flex_col()
@@ -336,7 +336,7 @@ impl SettingsWindow {
             .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
     }
 
-    fn control_note(&self, text: impl Into<SharedString>) -> Div {
+    pub(super) fn control_note(&self, text: impl Into<SharedString>) -> Div {
         div()
             .min_w_0()
             .text_color(rgb(self.theme.muted))
@@ -397,7 +397,7 @@ impl SettingsWindow {
             Section::Sound => self.render_sound_controls(cx),
             Section::Notifications => self.render_notification_controls(cx),
             Section::General => self.render_general_controls(cx),
-            Section::Appearance | Section::Integrations => div(),
+            Section::Appearance | Section::Integrations | Section::CloudDevices => div(),
         };
         div()
             .flex()

@@ -253,8 +253,14 @@ and saved SSH devices remain unsupported on Windows.
 
 ### Coder workspaces
 
-With a `[coder]` table in the GUI config (see `config-gpui.example.toml`), the
-device picker also offers **Add Coder Workspace…**. It signs in with Coder's
+Settings > **Cloud Devices** holds accounts with providers that create machines
+to use as devices; Coder is the only one so far. Its card edits the `[coder]`
+keys (see `config-gpui.example.toml`), saves the OAuth client secret to the
+credential store rather than the config file, signs in and out, and lists the
+saved Coder devices with a Remove action. A secret set in the config file or
+`HERDR_CODER_OAUTH_CLIENT_SECRET` takes precedence over the saved one.
+
+Once Coder is configured, the device picker also offers **Add Coder Workspace…**. It signs in with Coder's
 OAuth2 provider (authorization code with PKCE; the browser returns to the
 configured loopback redirect), then lists the account's templates, their presets,
 and existing workspaces. Choosing a template creates a workspace; choosing an

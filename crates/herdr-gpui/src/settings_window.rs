@@ -1,4 +1,5 @@
 //! Independent native preferences window. Disk work never owns a window or a socket.
+mod cloud_devices;
 mod controls;
 mod layouts;
 pub(crate) use layouts::{apply_loaded_layout, layout_load_revision};
@@ -49,17 +50,19 @@ pub(super) enum Section {
     Sound,
     Notifications,
     Integrations,
+    CloudDevices,
     General,
 }
 
 impl Section {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Appearance,
         Self::Fonts,
         Self::Indicators,
         Self::Sound,
         Self::Notifications,
         Self::Integrations,
+        Self::CloudDevices,
         Self::General,
     ];
 
@@ -71,6 +74,7 @@ impl Section {
             Self::Sound => "Sound",
             Self::Notifications => "Notifications",
             Self::Integrations => "Integrations",
+            Self::CloudDevices => "Cloud Devices",
             Self::General => "General",
         }
     }
@@ -83,6 +87,7 @@ impl Section {
             Self::Sound => "icons/chart.svg",
             Self::Notifications => "icons/bell.svg",
             Self::Integrations => "icons/agent-generic.svg",
+            Self::CloudDevices => "icons/globe.svg",
             Self::General => "icons/settings.svg",
         }
     }
@@ -95,6 +100,9 @@ impl Section {
             Self::Sound => "A little signal when something needs you.",
             Self::Notifications => "Stay informed without losing your place.",
             Self::Integrations => "Connect the agents you work with.",
+            Self::CloudDevices => {
+                "Create machines from your cloud accounts and use them as devices."
+            }
             Self::General => "The small details of your daily workflow.",
         }
     }
@@ -208,6 +216,8 @@ struct SettingsWindow {
     #[cfg(test)]
     layout_io: Option<layouts::LayoutIo>,
     remote_history: remote_history::RemoteHistory,
+    /// Built when Cloud Devices is first shown.
+    cloud: Option<cloud_devices::CloudDevices>,
     theme_loading: bool,
     theme_waiting: bool,
     theme_light: bool,
@@ -288,6 +298,7 @@ impl SettingsWindow {
             #[cfg(test)]
             layout_io: None,
             remote_history: Default::default(),
+            cloud: None,
             theme_loading: false,
             theme_waiting: false,
             theme_light: false,
@@ -515,6 +526,9 @@ impl SettingsWindow {
         if section == Section::General {
             self.sync_remote_history(false, cx);
         }
+        if section == Section::CloudDevices {
+            self.open_cloud_devices(cx);
+        }
         cx.notify();
     }
 
@@ -622,6 +636,7 @@ impl Render for SettingsWindow {
         let content = match self.section {
             Section::Appearance => self.render_appearance(window, cx),
             Section::Integrations => self.render_integration_controls(cx),
+            Section::CloudDevices => self.render_cloud_devices(cx),
             _ => self.render_controls(window, cx),
         };
         self.viewport_width = f32::from(window.viewport_size().width);
@@ -718,6 +733,8 @@ impl Render for SettingsWindow {
                                 .unwrap_or_else(|| {
                                     if self.section == Section::Appearance {
                                         "Themes and layouts change live; saved on Settings close or app quit."
+                                    } else if self.section == Section::CloudDevices {
+                                        "Account fields save with Save; sign-in and removal apply at once."
                                     } else {
                                         "Changes are saved automatically."
                                     }

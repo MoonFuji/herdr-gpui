@@ -56,7 +56,10 @@ fn environment_replaces_each_key() {
     .unwrap()
     .unwrap();
     assert_eq!(settings.base, "https://other.example.com/coder");
-    assert_eq!(settings.client_secret.expose_secret(), "env-secret");
+    assert_eq!(
+        settings.client_secret.as_ref().unwrap().expose_secret(),
+        "env-secret"
+    );
     let only_env = Settings::resolve(&CoderConfig::default(), |name| match name {
         "HERDR_CODER_URL" => Some("https://coder.example.com".into()),
         _ => None,
@@ -91,7 +94,6 @@ fn unsafe_or_ambiguous_values_are_rejected() {
         (|c: &mut CoderConfig| c.oauth_client_id = Some("bad/id".into())) as fn(&mut _),
         |c| c.oauth_client_id = None,
         |c| c.oauth_client_secret = Some("bad secret".into()),
-        |c| c.oauth_client_secret = None,
         |c| c.oauth_redirect_uri = None,
         |c| c.organization = Some("bad org".into()),
         |c| c.workspace_prefix = Some("Bad_Prefix".into()),

@@ -1,8 +1,7 @@
 //! "Add Coder Workspace": sign in to the configured deployment, pick a
 //! template and preset (or an existing workspace), wait for it, and, after
-//! explicit approval, install Herdr there. Jobs run on a named worker thread;
-//! the dialog drains their bounded mailbox from a foreground task, and closing
-//! the dialog cancels the job and discards anything it still sends.
+//! explicit approval, install Herdr there. Jobs run through `coder::worker`, so
+//! closing the dialog cancels the job and discards anything it still sends.
 
 use super::super::Page;
 use crate::{
@@ -10,21 +9,12 @@ use crate::{
     coder::{
         Preset, Progress, SavedWorkspace, Settings, Template, Workspace,
         setup::{self, Account, Ready, Source, Step},
+        worker,
     },
     search_input::SearchInput,
 };
 use gpui::{prelude::*, *};
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
-    time::Duration,
-};
 
-const MAILBOX: usize = 16;
-const DRAIN: Duration = Duration::from_millis(100);
 const SESSION: &str = "default";
 
 enum Update {
@@ -72,14 +62,8 @@ pub(in crate::menu) struct Wizard {
     ready: Option<Ready>,
     status: Option<String>,
     saved: Option<SavedWorkspace>,
-    cancel: Arc<AtomicBool>,
-    job: Option<Task<()>>,
-}
-
-impl Drop for Wizard {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Release);
-    }
+    /// Dropping the job cancels it, so closing the dialog stops its work.
+    job: Option<worker::Worker>,
 }
 
 fn step_text(step: &Step) -> String {
@@ -134,7 +118,6 @@ impl HerdrWindow {
             ready: None,
             status: None,
             saved: None,
-            cancel: Arc::new(AtomicBool::new(false)),
             job: None,
         });
         self.menu.page = Some(Page::AddCoder);
@@ -184,7 +167,6 @@ impl HerdrWindow {
             ready: None,
             status: None,
             saved: None,
-            cancel: Arc::new(AtomicBool::new(false)),
             job: None,
         });
         self.menu.page = Some(Page::AddCoder);
@@ -203,54 +185,26 @@ impl HerdrWindow {
         let Some(wizard) = &mut self.menu.coder else {
             return;
         };
-        wizard.cancel.store(true, Ordering::Release);
-        let cancel = Arc::new(AtomicBool::new(false));
-        wizard.cancel = cancel.clone();
+        // Dropping the old worker cancels it and discards its mailbox.
+        wizard.job = None;
         let settings = wizard.settings.clone();
-        let (tx, rx) = mpsc::sync_channel(MAILBOX);
-        let spawned = std::thread::Builder::new()
-            .name("herdr-coder-setup".into())
-            .spawn(move || {
-                let cancelled = || cancel.load(Ordering::Acquire);
-                // Progress is advisory and may be dropped; results block until
-                // read or until the dialog goes away.
-                let send = |update: Update| match update {
-                    Update::Step(_) => {
-                        let _ = tx.try_send(update);
-                    }
-                    update => {
-                        let _ = tx.send(update);
-                    }
-                };
-                work(&settings, &cancelled, &send);
-            });
-        if let Err(error) = spawned {
-            tracing::error!(category = "coder_worker", error_kind = ?error.kind(), "Could not start Coder setup worker");
-            self.menu.error = Some(crate::coder::Error::Worker("setup").to_string());
-            return;
-        }
-        wizard.job = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(DRAIN).await;
-                let mut updates = Vec::new();
-                let closed = loop {
-                    match rx.try_recv() {
-                        Ok(update) => updates.push(update),
-                        Err(mpsc::TryRecvError::Empty) => break false,
-                        Err(mpsc::TryRecvError::Disconnected) => break true,
-                    }
-                };
-                let alive = this.update(cx, |this, cx| {
-                    for update in updates {
-                        this.apply_coder(update, cx);
-                    }
-                    cx.notify();
-                });
-                if closed || alive.is_err() {
-                    return;
+        let spawned = worker::spawn(
+            "herdr-coder-setup",
+            cx,
+            move |cancelled, send| work(&settings, cancelled, send),
+            |this: &mut Self, update, cx| this.apply_coder(update, cx),
+        );
+        match spawned {
+            Ok(job) => {
+                if let Some(wizard) = &mut self.menu.coder {
+                    wizard.job = Some(job);
                 }
             }
-        }));
+            Err(error) => {
+                tracing::error!(category = "coder_worker", error_kind = ?error.kind(), "Could not start Coder setup worker");
+                self.menu.error = Some(crate::coder::Error::Worker("setup").to_string());
+            }
+        }
     }
 
     fn apply_coder(&mut self, update: Update, cx: &mut Context<Self>) {
