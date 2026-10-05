@@ -217,6 +217,14 @@ pub enum Error {
     GitPullRequestBase,
     #[error("Git worker stopped. Retry the operation.")]
     GitWorker,
+    #[error(
+        "No base branch to compare with: neither the pull request's base nor origin/HEAD, main, or master exists locally."
+    )]
+    ReviewNoBase,
+    #[error("A saved review tab names a checkout that is not a local absolute path.")]
+    InvalidReviewCheckout,
+    #[error("These changes are too large to review here, even leaving out the largest files.")]
+    ReviewTooLarge,
     #[error("Could not {operation}.")]
     GitProcess {
         operation: &'static str,
@@ -394,6 +402,24 @@ pub enum Error {
     SystemLoadUnsupported(String),
     #[error("CPU and memory output was not understood.")]
     SystemLoadOutput,
+    #[error("No checkout of this branch was found on its host.")]
+    CheckpointCheckout,
+    #[error("This checkout has no commit yet, so it has no checkpoints.")]
+    CheckpointUnborn,
+    #[error("That checkpoint no longer exists.")]
+    CheckpointMissing,
+    #[error("That checkpoint was taken on another branch. Check that branch out to restore it.")]
+    CheckpointBranch,
+    #[error("A merge, rebase, cherry-pick, or revert is in progress. Finish or abort it first.")]
+    CheckpointBusy,
+    #[error("Checkpoint Git commands failed")]
+    CheckpointScript(#[source] herdr_client::Error),
+    #[error("Checkpoint output was not understood.")]
+    CheckpointOutput,
+    #[error("Could not start the checkpoint worker")]
+    CheckpointThread(#[source] io::Error),
+    #[error("The checkpoint worker stopped.")]
+    CheckpointWorker,
     #[error("Enter a port number from 1 to 65535.")]
     ForwardPort,
     #[error("Port {0} is already forwarded from this host.")]
