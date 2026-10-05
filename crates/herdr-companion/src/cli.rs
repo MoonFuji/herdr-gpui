@@ -2,7 +2,12 @@
 //! exits before any socket is bound.
 
 use serde_json::{Value, json};
-use std::{ffi::OsString, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    ffi::OsString,
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    time::Duration,
+};
 
 pub const TOKEN_ENV: &str = "HERDR_COMPANION_TOKEN";
 const DEFAULT_LISTEN: &str = "127.0.0.1:8787";
@@ -49,19 +54,22 @@ pub enum CliError {
     MissingValue(&'static str),
     #[error("invalid value for `{0}`")]
     InvalidValue(&'static str),
+    #[error("`{0}` and `{1}` cannot be combined")]
+    Conflict(&'static str, &'static str),
 }
 
 pub fn usage() -> String {
     format!(
         "herdr-companion: answer Claude Code prompts for Herdr agents from another device\n\n\
          USAGE:\n  \
-         herdr-companion serve [--listen ADDR] [--decision-timeout SECS] [--herdr-socket PATH]\n  \
-                               [--ntfy URL [--ntfy-details]] [--public-url URL] [--no-qr]\n  \
+         herdr-companion serve [--all | --listen ADDR] [--decision-timeout SECS] [--herdr-socket PATH]\n  \
+         \x20                       [--ntfy URL [--ntfy-details]] [--public-url URL] [--no-qr]\n  \
          herdr-companion hooks [--url URL] [--decision-timeout SECS]\n  \
          herdr-companion qr [--url URL]\n\n\
          `serve` reads its bearer token from {TOKEN_ENV} and listens on {DEFAULT_LISTEN} by default.\n\
-         It also serves the web app at /. With --public-url it prints a QR code that opens the\n\
-         app on a phone already signed in; `qr` prints that code again.\n\
+         --all listens on every interface (port 8787). At startup it prints a QR code that opens\n\
+         the web app on a phone already signed in, using --public-url, else the Tailscale or LAN\n\
+         address; `qr` prints a code again.\n\
          `hooks` prints the Claude Code settings that point hooks at the companion.\n"
     )
 }
@@ -89,6 +97,8 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
     };
     let serve = mode == Mode::Serve;
     let mut no_qr = false;
+    let mut all = false;
+    let mut listen_given = false;
     while let Some(arg) = args.next() {
         let mut value = |name| args.next().ok_or(CliError::MissingValue(name));
         match arg.to_str() {
@@ -101,7 +111,9 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
                     .ok_or(CliError::InvalidValue("--decision-timeout"))?;
                 decision_timeout = Duration::from_secs(secs);
             }
+            Some("--all") if serve => all = true,
             Some("--listen") if serve => {
+                listen_given = true;
                 listen = value("--listen")?
                     .to_str()
                     .and_then(|addr| addr.parse().ok())
@@ -127,6 +139,12 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
             }
             _ => return Err(CliError::Unknown(arg.to_string_lossy().into_owned())),
         }
+    }
+    if all {
+        if listen_given {
+            return Err(CliError::Conflict("--all", "--listen"));
+        }
+        listen.set_ip(Ipv4Addr::UNSPECIFIED.into());
     }
     Ok(match mode {
         Mode::Serve => Command::Serve(ServeOptions {
@@ -269,6 +287,22 @@ mod tests {
         assert_eq!(
             parse(&["hooks", "--ntfy-details"]),
             Err(CliError::Unknown("--ntfy-details".into()))
+        );
+    }
+
+    #[test]
+    fn all_listens_on_every_interface() {
+        let Command::Serve(options) = parse(&["serve", "--all"]).unwrap() else {
+            panic!("serve");
+        };
+        assert_eq!(options.listen, "0.0.0.0:8787".parse().unwrap());
+        assert_eq!(
+            parse(&["serve", "--all", "--listen", "0.0.0.0:1"]),
+            Err(CliError::Conflict("--all", "--listen"))
+        );
+        assert_eq!(
+            parse(&["hooks", "--all"]),
+            Err(CliError::Unknown("--all".into()))
         );
     }
 

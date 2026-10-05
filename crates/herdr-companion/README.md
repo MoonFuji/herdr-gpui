@@ -38,18 +38,28 @@ Export the token where Herdr panes inherit it, for example in your shell profile
 
 ### On the phone
 
-The server speaks plain HTTP and binds to loopback by default. Reach it through
-an encrypted tunnel; Tailscale is the simplest:
+The quickest start listens on every interface and prints a QR code at once:
+
+```sh
+herdr-companion serve --all
+```
+
+Scan it with the phone's camera and the web app opens already signed in. The
+code uses the machine's Tailscale address when it has one, because WireGuard
+encrypts that traffic. Otherwise it uses the LAN address and warns that plain
+HTTP exposes the token to anyone on that network. Any other reachable address
+is listed under the code. Addresses come from the routing table; no packets
+are sent to find them.
+
+To install the app to the home screen (Safari: Share → Add to Home Screen),
+you need HTTPS, which `tailscale serve` provides:
 
 ```sh
 tailscale serve --bg 8787        # https://<machine>.<tailnet>.ts.net
 herdr-companion serve --public-url https://<machine>.<tailnet>.ts.net
 ```
 
-With `--public-url`, `serve` prints a QR code at startup. Scan it with the
-phone's camera and the web app opens already signed in. Then add it to the home
-screen (Safari: Share → Add to Home Screen). Installing a web app needs HTTPS,
-which `tailscale serve` provides.
+The QR code uses `--public-url` whenever it is given.
 
 - **What the code holds.** The code is a link to `/#token=…`. Browsers never
   send the part after `#` to the server, so the token stays out of request
@@ -65,9 +75,8 @@ which `tailscale serve` provides.
   it has stored the token.
 - **Terminal colours.** The code is drawn for a dark terminal background. On
   a light background it appears inverted, which most phone cameras still read.
-- **Other addresses.** If you bind to a non-loopback address with `--listen`,
-  the server prints a warning. Without `--public-url`, it then encodes that
-  address in the QR code instead.
+- **No reachable address.** On loopback without `--public-url` there is
+  nothing a phone can open, so `serve` prints a hint instead of a code.
 
 ### Push notifications
 
@@ -88,6 +97,9 @@ the ntfy server can read them. Tapping a notice opens `--public-url`.
 ### Options for `serve`
 
 - `--listen ADDR`: the address to bind, `127.0.0.1:8787` by default.
+- `--all`: listen on every interface, `0.0.0.0:8787`. It cannot be combined
+  with `--listen`; for another port, use `--listen 0.0.0.0:PORT`, which
+  detects addresses the same way.
 - `--decision-timeout SECS`: how long a hook waits for the phone before the
   prompt goes back to the terminal, 110 by default. `hooks` takes the same
   option and gives Claude Code's own timeout 10 seconds more.

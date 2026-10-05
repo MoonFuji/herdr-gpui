@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use herdr_companion::{
     Command, Companion, Config, Limits, Notifier, ServeOptions, hooks_settings, pairing_url,
-    parse_args, render_qr, usage,
+    parse_args, phone_urls, render_qr, route_probe, usage,
 };
 use std::{
     env,
@@ -56,17 +56,15 @@ fn run(command: Command) -> anyhow::Result<()> {
     let token = token()?;
     let listener = TcpListener::bind(options.listen)
         .with_context(|| format!("could not listen on {}", options.listen))?;
-    if !options.listen.ip().is_loopback() {
-        eprintln!(
-            "herdr-companion: warning: {} is not loopback and this server speaks plain HTTP; \
-             expose it through an encrypted tunnel such as Tailscale",
-            options.listen
-        );
-    }
     eprintln!("herdr-companion: listening on {}", options.listen);
     // A QR code carries the token, so it never goes to a log file.
     if !options.no_qr && stderr().is_terminal() {
         print_pairing(&options, &token)?;
+    } else if !options.listen.ip().is_loopback() {
+        eprintln!(
+            "herdr-companion: warning: listening beyond loopback over plain HTTP; prefer a \
+             Tailscale address or `tailscale serve`"
+        );
     }
     let herdr_socket = match options.herdr_socket {
         Some(path) => Some(path),
@@ -95,26 +93,32 @@ fn token() -> anyhow::Result<String> {
     Ok(token)
 }
 
-/// Prints the QR code a phone scans to open the web app signed in. A
-/// loopback or wildcard address is not one a phone can open, so without
-/// `--public-url` those get a hint instead.
+/// Prints the QR code a phone scans to open the web app signed in, for the
+/// best address a phone can reach, and lists the others.
 fn print_pairing(options: &ServeOptions, token: &str) -> anyhow::Result<()> {
-    let ip = options.listen.ip();
-    let base = match &options.public_url {
-        Some(url) => url.clone(),
-        None if !ip.is_loopback() && !ip.is_unspecified() => format!("http://{}", options.listen),
-        None => {
-            eprintln!(
-                "herdr-companion: pass --public-url with the address your phone uses \
-                 (for example from `tailscale serve`) to get a pairing QR code"
-            );
-            return Ok(());
-        }
+    let urls = phone_urls(options.listen, options.public_url.as_deref(), route_probe);
+    let Some(best) = urls.first() else {
+        eprintln!(
+            "herdr-companion: no address a phone can reach; use --all, or pass --public-url \
+             with the address your phone uses (for example from `tailscale serve`)"
+        );
+        return Ok(());
     };
-    let link = pairing_url(&base, token);
     eprintln!(
-        "herdr-companion: scan to open the companion on your phone (treat it like a password):\n{}",
-        render_qr(&link)?
+        "herdr-companion: scan to open {} on your phone (treat the code like a password):\n{}",
+        best.url,
+        render_qr(&pairing_url(&best.url, token))?
     );
+    for other in &urls[1..] {
+        eprintln!("herdr-companion: also reachable at {}", other.url);
+    }
+    if !best.encrypted {
+        eprintln!(
+            "herdr-companion: warning: {} is plain HTTP, so anyone on that network can read the \
+             token. A Tailscale address or `tailscale serve` encrypts it, and installing the app \
+             to the home screen needs HTTPS.",
+            best.url
+        );
+    }
     Ok(())
 }

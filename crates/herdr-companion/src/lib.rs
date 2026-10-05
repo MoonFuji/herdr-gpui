@@ -25,6 +25,6 @@ pub use cli::{Command, ServeOptions, hooks_settings, parse_args, usage};
 pub use error::{Error, HttpError, Result};
 pub use herdr_api::{Agent, AgentStatus, Herdr, Placement, StartAgent, Workspace, default_socket};
 pub use notify::{Notice, Notifier, notice_for};
-pub use pairing::{pairing_url, render_qr};
+pub use pairing::{PhoneUrl, pairing_url, phone_urls, render_qr, route_probe};
 pub use server::{Companion, Config, serve};
 pub use transcript::Entry;
