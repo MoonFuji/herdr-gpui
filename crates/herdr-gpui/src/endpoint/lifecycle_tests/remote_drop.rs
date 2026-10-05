@@ -105,3 +105,35 @@ fn a_refusal_only_the_user_can_fix_waits_the_longest_retry_delay() {
         assert_eq!(endpoint.outage(), Some(error.as_str()));
     }
 }
+
+/// The worker stops the handle before its disconnect state reaches the inbox,
+/// so a poll can find the connection gone while `live` still holds the old
+/// snapshot. An activation budget must not run out in that gap either.
+#[gpui::test]
+fn a_drop_seen_before_its_state_arrives_does_not_fall_back_to_local(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, _server) = connected_endpoint("ssh:remote");
+    view.update(cx, |view, cx| {
+        prepare_mouse(view, endpoint);
+        view.endpoints[1].retry_at = Instant::now() + Duration::from_secs(120);
+        // A stopped handle delivers no disconnect state at all.
+        view.endpoints[1]
+            .connection
+            .handle
+            .as_ref()
+            .unwrap()
+            .disconnect();
+        view.activation_deadline = Some(Instant::now());
+        view.poll_endpoints(cx);
+        assert_eq!(
+            view.selected_endpoint, 1,
+            "a drop must not fall back to Local"
+        );
+        assert!(view.endpoints[1].connection.handle.is_none());
+        assert!(view.live.snapshot.is_some(), "the gap under test");
+        assert!(view.activation_deadline.unwrap() > Instant::now());
+    });
+}

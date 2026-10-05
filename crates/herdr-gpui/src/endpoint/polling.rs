@@ -121,7 +121,10 @@ impl HerdrWindow {
         }
         // Activation is timed from the snapshot it needs. An endpoint that is
         // down or still handshaking is retried in place, never given up for Local.
-        if self.live.snapshot.is_none()
+        // The handle stops before the disconnect state reaches the inbox, so
+        // `live` can still hold the lost connection's snapshot for a poll; the
+        // outage is recorded as soon as the stop is seen.
+        if (self.live.snapshot.is_none() || endpoint.outage().is_some())
             && let Some(deadline) = &mut self.activation_deadline
         {
             *deadline = Instant::now() + ACTIVATION_TIMEOUT;
