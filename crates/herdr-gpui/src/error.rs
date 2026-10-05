@@ -24,6 +24,22 @@ fn daemon_error_message(error: &serde_json::Value) -> &str {
 pub enum Error {
     #[error("Could not finish saving Settings: {0}")]
     SettingsSave(#[source] std::sync::Arc<Error>),
+    #[error("palette.project_roots must contain at most 16 nonempty paths of at most 8192 bytes")]
+    PaletteProjectRoots,
+    #[error("Project paths must be absolute UTF-8 paths without control characters")]
+    PaletteProjectPath,
+    #[error("Project path references an unset environment variable: {0}")]
+    PaletteProjectVariable(String),
+    #[error("Project discovery reached its directory limit; narrow palette.project_roots")]
+    PaletteProjectLimit,
+    #[error("Project directory is no longer available")]
+    PaletteProjectRemoved,
+    #[error("The local connection changed. Reopen the palette.")]
+    PaletteLocalChanged,
+    #[error("Unexpected workspace creation response. Review workspace state before retrying.")]
+    PaletteProjectResponse,
+    #[error("Workspace directories changed. Select the project again.")]
+    PaletteProjectStateChanged,
     #[error("Invalid saved window geometry or too many saved windows")]
     InvalidWindowState,
     #[error("Sound configuration exceeds 1 MiB")]
@@ -270,6 +286,28 @@ pub enum Error {
     GitHubNetwork(#[source] ureq::Error),
     #[error("GitHub query failed. Check token repository permissions and rate limits.")]
     GitHubQuery,
+    /// GitHub's own refusal of a requested change, cleaned and bounded.
+    #[error("GitHub refused the request: {0}")]
+    GitHubRejected(String),
+    #[error("A pull request action is already running.")]
+    PrActionBusy,
+    #[error(
+        "This pull request cannot be acted on here: it is not open, or its details are incomplete. Refresh and try again."
+    )]
+    PrActionTarget,
+    #[error("Enter a comment of at most 4096 characters.")]
+    PrCommentBody,
+    #[error("The branch changed since this dialog opened. Review the pull request again.")]
+    PrMergeChanged,
+    #[error("The repository does not allow this merge method.")]
+    PrMergeMethod,
+    #[error("Pull request worker stopped. Check the pull request on GitHub before retrying.")]
+    PrActionWorker,
+    #[error("Could not start the pull request worker.")]
+    PrActionProcess {
+        #[source]
+        source: io::Error,
+    },
     #[error("Invalid GitHub authorization header.")]
     GitHubHeader(#[source] ureq::http::header::InvalidHeaderValue),
     #[error("Invalid GitHub device authorization response.")]
@@ -322,6 +360,10 @@ pub enum Error {
     UsageNotSignedIn,
     #[error("This account has no plan with usage limits to show.")]
     UsageNoPlan,
+    #[error("Reading this sign-in needs Keychain access, which macOS asks for.")]
+    UsageKeychainAccess,
+    #[error("Keychain access was denied, so this sign-in cannot be read.")]
+    UsageKeychainDenied,
     #[error("Usage request mixes this machine's settings with the remote host's sign-in.")]
     UsageMixedSecrets,
     #[error("Usage command failed: {0}.")]
@@ -352,6 +394,42 @@ pub enum Error {
     SystemLoadUnsupported(String),
     #[error("CPU and memory output was not understood.")]
     SystemLoadOutput,
+    #[error("Enter a port number from 1 to 65535.")]
+    ForwardPort,
+    #[error("Port {0} is already forwarded from this host.")]
+    ForwardDuplicate(u16),
+    #[error("At most {0} ports can be forwarded at once.")]
+    ForwardLimit(usize),
+    #[error("Could not read listening ports on this host.")]
+    ListeningPorts(#[source] Box<Error>),
+    #[error("Neither ss nor lsof is installed on this host, so listening ports cannot be read.")]
+    ListeningPortsTool,
+    #[error("Listening ports cannot be read on this platform.")]
+    ListeningPortsUnsupported,
+    #[error("No free local port for an SSH tunnel.")]
+    TunnelPort(#[source] io::Error),
+    #[error("Could not start ssh for a tunnel.")]
+    TunnelStart(#[source] io::Error),
+    #[error("SSH ended before the tunnel opened ({0}).")]
+    TunnelExited(std::process::ExitStatus),
+    #[error("The SSH tunnel did not open in time.")]
+    TunnelTimeout,
+    #[error("Could not ask Herdr which process the pane runs.")]
+    ProcessesQuery(#[source] herdr_client::Error),
+    #[error("Herdr's answer about the pane's process was not understood.")]
+    ProcessesAnswer(#[source] serde_json::Error),
+    #[error("Herdr did not name a process for this pane.")]
+    ProcessesNoRoot,
+    #[error("The pane's process has exited.")]
+    ProcessesRootExited,
+    #[error("The herdr executable's path is not valid UTF-8.")]
+    ProcessesExecutable,
+    #[error("Still ending the last processes. Try again in a moment.")]
+    ProcessesBusy,
+    #[error("The process list stopped updating. Reopen it to try again.")]
+    ProcessesStopped,
+    #[error("Could not start watching the pane's processes.")]
+    ProcessesWorker(#[source] io::Error),
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]
@@ -477,6 +555,8 @@ pub enum Error {
     InvalidSidebarGap,
     #[error("theme must be a name, absolute path, or ~/ path")]
     InvalidThemePath,
+    #[error("a theme that follows the system must name both sides: light:NAME,dark:NAME")]
+    InvalidThemePair,
     #[error("keybindings.{0} is not a command; see the keybindings list in config-gpui.toml")]
     UnknownKeybinding(String),
     #[error("keybindings.{command}: invalid keystroke {keystroke:?}")]
@@ -500,6 +580,27 @@ pub enum Error {
         keystroke: String,
         first: &'static str,
         second: &'static str,
+    },
+    #[error("pane_keys: invalid keystroke {keystroke:?}")]
+    InvalidPaneKey {
+        keystroke: String,
+        #[source]
+        source: gpui::InvalidKeystrokeError,
+    },
+    #[error(
+        "pane_keys: {0:?} needs a cmd, ctrl, alt, or fn modifier so typing still reaches the terminal"
+    )]
+    PaneKeyWithoutModifier(String),
+    #[error("pane_keys.{from:?}: a pane cannot receive {to:?}")]
+    UnsendablePaneKey { from: String, to: String },
+    #[error("pane_keys: {0:?} is listed twice")]
+    DuplicatePaneKey(String),
+    #[error("pane_keys must list at most {0} keystrokes")]
+    TooManyPaneKeys(usize),
+    #[error("pane_keys: {keystroke:?} is also bound to keybindings.{command}")]
+    PaneKeyBound {
+        keystroke: String,
+        command: &'static str,
     },
     #[error("the host did not publish its keybindings")]
     ServerKeybindingsMissing,

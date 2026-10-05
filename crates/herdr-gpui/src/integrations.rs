@@ -159,15 +159,6 @@ impl Integrations {
 }
 
 impl HerdrWindow {
-    /// Whether the selected daemon reports integration assets that need an
-    /// update. The daemon's own flag, so it holds before the list is loaded.
-    pub(crate) fn integration_updates_available(&self) -> bool {
-        self.live
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.integration_updates_available)
-    }
-
     fn integration_scope_current(&self, scope: &Scope) -> bool {
         self.endpoints
             .get(self.selected_endpoint)
@@ -346,7 +337,7 @@ impl HerdrWindow {
         let mut body = div().id("integrations-body").min_h_0().overflow_y_scroll()
             .track_scroll(&state.scroll).p(px(16.))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(crate::sidebar::label_text(&format!("Daemon host: {host}"))))
-            .child(div().mt(px(8.)).text_color(rgb(theme.muted)).child("Install updates agent configuration on this daemon's host, not necessarily this computer. No integrations are installed automatically."));
+            .child(div().mt(px(8.)).text_color(rgb(theme.subtext())).child("Install updates agent configuration on this daemon's host, not necessarily this computer. No integrations are installed automatically."));
         if let Some(error) = &state.error {
             body = body.child(
                 div()

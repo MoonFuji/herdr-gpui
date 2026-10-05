@@ -15,6 +15,8 @@ pub(crate) enum Page {
     /// A saved SSH device's context menu, from its sidebar host header.
     Host,
     RenameDevice,
+    /// Names a saved SSH device's port to forward to this computer.
+    ForwardPort,
     RemoveDevice,
     /// Sign in to Coder and add one of its workspaces as a device.
     AddCoder,
@@ -34,14 +36,25 @@ pub(crate) enum Page {
     Group,
     Pane,
     RenamePane,
+    /// The processes under the pane menu's pane.
+    PaneProcesses,
+    /// Confirming the processes chosen there should end.
+    KillProcesses,
     Workspace,
     GitHub,
     /// Titlebar Git actions for the focused checkout, and its commit dialog.
     Git,
     GitCommit,
+    /// The open pull request's checks and review conversation.
+    PrReview,
+    PrComment,
+    /// Choosing a merge method, and confirming it.
+    PrMerge,
     Dialog(WorkspaceAction),
     /// Moving a linked worktree to another host.
     Teleport,
+    /// One prompt sent to several agents, and their comparison.
+    FanOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +86,8 @@ pub(crate) enum WorkspaceMenuAction {
     GoToTeleported,
     /// Forget that this checkout's work was teleported away.
     ClearTeleported,
+    /// Send one prompt to several agents, or reopen their comparison.
+    FanOut,
 }
 
 impl WorkspaceMenuAction {
@@ -93,6 +108,7 @@ impl WorkspaceMenuAction {
             Self::Teleport | Self::GoToTeleported => "icons/teleport.svg",
             Self::TeleportBack => "icons/teleport-back.svg",
             Self::ClearTeleported => "icons/x.svg",
+            Self::FanOut => "icons/split.svg",
             Self::PullRequest => return None,
         })
     }

@@ -205,6 +205,27 @@ edits only the local catalog: the host's own Herdr keeps running. When the
 device has its own GitHub sign-in, the confirmation also offers to delete it,
 since its account panel goes away with the device. Local has no such menu.
 
+**Forward port…** in the same menu forwards one of the host's ports, such as a
+dev server an agent started there, to this computer. Each forward has its own
+`ssh -N` master on a private control socket, which is then asked to listen with
+`ssh -O forward -L 127.0.0.1:<local>:localhost:<remote>`. That request succeeds
+only once this forward's own SSH holds the port, so a port another local
+process took first is never shown as forwarded. The local port keeps the remote
+number when it can, privileged ports move up by 10000 (80 becomes 10080), and a
+refused port falls back once to one the system picks. The menu lists the host's
+forwards as connecting, listening (with **Open**, which shows
+`http://127.0.0.1:<local>/` in a browser tab; the address rather than
+`localhost`, since SSH listens on IPv4 loopback only), or ended with the
+reason, and a flash reports each change. Nothing reconnects: a forward ends
+when you stop it, when its host is disabled or removed, when the window closes,
+or when the app quits, and stays ended until you forward the port again. A
+dropped Herdr connection leaves it running. The master uses the bridge's
+noninteractive SSH policy but never a master of yours, which would keep the
+forward after it is stopped, so hosts that authenticate only through a master
+cannot forward. It still applies `LocalForward`/`RemoteForward` entries from
+your SSH config, as `ssh -N` would. Forwarding needs a Unix client, like every
+saved SSH device.
+
 The label is optional: an empty one names the device after its SSH target as
 typed, such as `user@host` or an address. Once the device is saved, the dialog
 closes by itself.
@@ -279,6 +300,24 @@ downloads or runs an installer. After installing, choose Terminal > Reconnect.
 **QA > Show herdr non-detected modal** previews the warning without restarting,
 disconnecting, or changing daemon detection. Closing the GUI leaves the daemon
 and its terminals running.
+
+Reopening the GUI keeps each pane's scrollback, which the daemon holds. Herdr
+replays scrollback after the daemon itself restarts only when its opt-in
+`[experimental] pane_history = true` is set. **Settings > General > Session
+restore** toggles that shared setting and asks the daemon to reload it. Herdr
+then saves pane output to `session-history.json` next to `session.json`, so
+treat that file like terminal history. The GUI never writes terminal output to
+disk itself.
+
+Each connected SSH host's daemon reads its own config, so the same card lists
+one switch per host. A switch reads that host's
+`${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-~/.config}/herdr/config.toml}`, as
+the SSH login environment resolves it, over the noninteractive connection
+policy. It writes only `[experimental] pane_history`, keeping comments and
+other keys. The edit is renamed into place only if the file still matches
+what was read; otherwise it reports a conflict and asks for a reload. It then
+asks that host's daemons to reload. Symlinked configs and files over 64 KiB
+are refused, and a file the GUI creates is private (`0600`).
 
 ## Configuration
 
@@ -357,7 +396,7 @@ Accepted saves survive closing Settings. Family and size edits preserve configur
 fallbacks and unrelated settings in `config-gpui.local.toml`. General retains
 browser-skill installation/removal and configuration paths.
 
-General provides switches for **Show usage**, **Confirm tab close**, and the
+General provides switches for **Show usage**, **Confirm tab close**, **Confirm pane close**, and the
 clipboard copied notification, plus all six clipboard positions. Notifications
 provides a native in-app switch, a bounded delay stepper (0-3600 seconds), and
 four corner choices. Each notification and clipboard field has a **Follow shared**
@@ -466,9 +505,11 @@ written to disk, so a reload or a restart returns to the configured size.
 A tab asks before closing only while one of its agents is working or blocked
 on a prompt; tabs whose agents are idle or done, or that have none, close at
 once. Set top-level `confirm_close_tab = false` to never ask for tabs
-(including their running processes), and `show_agents = false` to hide the Agents
-section and give Spaces the full sidebar height. Both default to `true`. Pane
-closures still ask for confirmation. Saved edits apply automatically. The
+(including their running processes), `confirm_close_pane = false` to close
+panes without asking, and `show_agents = false` to hide the Agents
+section and give Spaces the full sidebar height. All three default to `true`.
+The pane dialog's **Do not ask again** checkbox (click it or press Space) saves
+`confirm_close_pane = false` to `config-gpui.local.toml` once the close is sent. Saved edits apply automatically. The
 **Show agents** control in **Settings > Appearance > Sidebar layout** saves
 `show_agents` immediately, independently of the layout draft saved on close.
 
@@ -499,6 +540,32 @@ every two seconds over its own SSH shell, kept open while the host is connected
 systems, and remote hosts from a Windows client, show it as unavailable. Set top-level `show_system_load = false`,
 or turn off **Show CPU and memory** in Settings, to hide it and stop sampling.
 
+Workspaces that run a server show the TCP ports it listens on, as `:3000`
+chips on a line under the workspace's sidebar row and, for the focused
+workspace, in the status bar. Clicking one opens the page in a browser tab of
+that workspace (`http://localhost:<port>` on this machine). A port belongs to
+a workspace when its process inherited the `HERDR_WORKSPACE_ID` Herdr sets in
+every pane, so system services and servers started outside Herdr never show,
+and its `HERDR_SOCKET_PATH` names the same daemon, so two sessions on one
+machine never claim each other's servers.
+Every five seconds each host runs `ss -ltnp` (Linux) or `lsof -iTCP
+-sTCP:LISTEN` (macOS) in its own shell, this machine's locally and a connected
+remote host's over SSH, listing only your own processes. A remote server opens
+at the SSH host's name when it listens on every address, the `HostName` your
+SSH configuration gives an alias (`ssh -G`) when it has one. One listening only
+on the remote loopback opens through an SSH tunnel started on the first click:
+`ssh -N -L` from a free port on this machine's loopback, with the same
+noninteractive options as the remote connection. The page opens only once SSH
+itself reports the forward bound, never because something answers on the
+port. Tunnels do not share a `ControlMaster` connection, so they need
+noninteractive authentication (keys or an agent). The tunnel stays up while
+the port is listed, is reused by later clicks, and closes when the port
+stops listening, the host disconnects, scanning is turned off, or the window
+closes; a page reopened after a dropped tunnel keeps its address while that
+local port is free. Windows clients
+do not scan this machine. Set top-level `show_listening_ports = false`, or
+turn off **Show listening ports** in Settings, to hide them and stop scanning.
+
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
 for GUI-local in-app delivery, independently per key. `enabled = true` shows
 in-app toasts even when shared delivery is `system`; `enabled = false` leaves
@@ -523,7 +590,8 @@ already waiting in a connection inbox from the disabled period are discarded too
 Failed reloads preserve current settings. QA
 previews remain available regardless of delivery settings.
 
-The sidebar button at the left of the titlebar hides or shows the sidebar.
+The sidebar button at the left of the titlebar (the sidebar's top row, or the
+leftmost tab strip while the sidebar is collapsed) hides or shows the sidebar.
 It stays available when the sidebar is hidden; the existing View menu command and shortcut still work.
 In **Settings > General**, toggle **Show usage** to turn the bottom quota display on or off.
 The choice is saved to `config-gpui.local.toml` and follows the existing `[usage] show` setting.
@@ -817,6 +885,21 @@ audio deduplication. Native playback and device-switch/unplug behavior require m
 
 ## Title Bar
 
+With Herdr's tab bar at the top (`ui.tab_bar_position = "top"`, the default),
+the tab row is the title bar, as in Chrome or Conductor, and the window draws
+no separate header. Strips along the top grow to the header's 34px. The
+sidebar column starts with a row holding the traffic-light clearance and the
+sidebar toggle; with the sidebar collapsed to its rail or hidden, the leftmost
+group's strip leads with whatever clearance the column leaves and the toggle.
+The rightmost group's strip ends with the header's status text, Git button,
+account, and window controls. Every strip keeps at least 40px of empty room
+after its tabs that moves the window, so the window stays movable however many
+tabs a strip holds; tabs beyond the strip's width scroll as before. A bottom
+tab bar, or a lone tab hidden by `hide_tab_bar_when_single_tab`, brings back
+the full-width header described below, and so does a window with no strips.
+The worktree banner moves to the window's foot in this layout so it never sits
+under the traffic lights.
+
 macOS keeps `Some(TitlebarOptions)` and the native Herdr window title/traffic lights,
 with transparent chrome and lights positioned at (9, 9) logical pixels. A full-width
 34px header blends `theme.surface` roughly 10% toward white, subtly lifting dark
@@ -827,7 +910,21 @@ the theme foreground. This profile control opens native GitHub sign-in and shows
 the authenticated user's avatar when connected. It consumes clicks so
 double-clicking it does not invoke the title-bar action.
 The header and clearance remain in fullscreen so the body layout stays stable.
-Windows/Linux keep the existing native frame and do not render this header.
+On Windows and Linux the main window shows the same header below the native
+frame, with an 8px lead in place of the traffic-light clearance; Settings,
+Logs, and the mockup board rely on the native frame alone.
+
+Some Linux compositors, GNOME's Wayland session among them, draw no frame for
+other applications, and GPUI falls back to client-side decorations there.
+Every window then draws its own: pressing the header starts a compositor move
+(a double-click maximizes or restores instead), a right-click opens the compositor's window menu when it offers one, and the
+header ends in minimize, maximize/restore, and close buttons, each shown only
+when the compositor supports it, with close always present. Secondary windows
+show the header in this mode too. Close runs the window's own close path, so
+Settings still finishes pending preferences first. A 10px transparent band
+around the window carries a shadow and the resize handles; edges the
+compositor tiles lose both, so a maximized window fills the screen. X11 and
+compositors with server-side decorations keep their native frame.
 
 Linked-worktree builds add a full-width, 22px amber banner below
 the macOS header (above the body on Linux), with the compile-time branch or short
@@ -842,12 +939,12 @@ Build identity and icon selection are described in the
 [release notes](../../scripts/release/README.md#build-identity).
 
 The reference is Zed's `crates/platform_title_bar/src/platform_title_bar.rs` and
-window options in `crates/zed/src/zed.rs`, not a build dependency. Double-click calls
-`Window::titlebar_double_click()` to honor the OS preference. We leave `is_movable`
-unchanged and rely on native AppKit dragging, with no custom drag handlers or platform
-patches. That choice predates GPUI 0.3.6: 0.2.2 had no macOS `start_window_move`
-implementation and ignored `WindowControlArea::Drag`, while 0.3.6 implements
-`start_window_move`.
+window options in `crates/zed/src/zed.rs`, not a build dependency. On macOS every
+window sets `app_owns_titlebar_drag`, so AppKit never moves the window from under a
+tab or delays titlebar clicks; pressing the header, the sidebar's top row, or a
+strip's empty room calls `Window::start_window_move`, and a double-click calls
+`Window::titlebar_double_click()` to honor the OS preference. `is_movable` stays
+unchanged, so the Window menu's tiling items stay enabled.
 
 Headless tests check the actual root header/center/account-slot bounds at wide,
 minimum, and narrow sizes, including mock fullscreen entry/exit, and that the
@@ -856,7 +953,11 @@ icon produces a nonempty mask. These do not verify AppKit behavior. Native QA re
 required for dragging across the header, traffic-light alignment and actions,
 double-click preferences (zoom/minimize/do nothing), fullscreen transitions and
 auto-hidden controls, theme changes, and modal/focus/IME behavior. Windows/Linux
-native-frame appearance also remains unverified by these macOS tests.
+native-frame appearance also remains unverified by these macOS tests. Headless
+tests check the client-decorated frame (inset, handles kept out of the content,
+tiled edges, and button order and support) with forced decorations. Native QA
+on GNOME Wayland remains required for dragging, resizing, the window menu,
+maximize/restore, and the shadow.
 
 ## Terminal Selection And Copy
 
@@ -875,10 +976,10 @@ Right-Click** switches the pane back. A routed pane whose application has mouse
 reporting off opens the menu, since nothing would receive the click. A
 mouse-aware popup has no pane menu and keeps its right-clicks.
 
-Drag across the terminal to select cells; releasing the button copies them, drops
-the highlight, and shows the `copied to clipboard` flash described under
+Drag across the terminal to select cells; releasing the button copies them and
+shows the `copied to clipboard` flash described under
 [Configuration](#configuration). Selection is client-local: it reads the surface
-the client already has, sends nothing to the daemon, and asks it for nothing.
+the client already has, and asks the daemon only for rows scrolled out of view.
 
 A program that copies with OSC 52 — many editors and agent CLIs do, especially
 when they own the mouse — is honored too: the daemon forwards the bytes to this
@@ -900,12 +1001,29 @@ clipboard, and trailing blanks are dropped only from rows selected through to th
 pane's right edge, where a terminal pads short lines. A copy is bounded, and one
 too large to copy reports in the status bar instead.
 
-The highlight is cleared by the release that copies it, and by a reconnect,
-detach, or endpoint switch. Cmd-V still sends semantic paste; there is no copy
-keystroke, because the release has already copied and nothing stays selected.
-For the same reason, the native **Edit** menu enables only **Paste** while a
-terminal has focus. In dialogs and search fields, **Cut**, **Copy**, **Paste**,
-and **Select All** do the same as Cmd-X, Cmd-C, Cmd-V, and Cmd-A.
+The highlight stays after the release copies it, until the next click or
+keystroke, a reconnect, detach, or endpoint switch. While it shows, Cmd-C and
+**Edit > Copy** copy it again; Ctrl-C still reaches the pane, which interrupts
+the program there and clears the highlight. Set `keep_selection_after_copy =
+false` in `config-gpui.local.toml` to clear the highlight on release instead.
+
+With Herdr's `[ui] copy_on_select = false`, shared with the TUI, the release
+copies nothing: the highlight waits for Cmd-C, Ctrl-C, or **Edit > Copy**, and
+any other key drops it, as in Herdr.
+
+Cmd-V sends semantic paste. While a terminal has focus, the native **Edit** menu
+enables **Paste**, and **Copy** while a selection is highlighted. In dialogs and
+search fields, **Cut**, **Copy**, **Paste**, and **Select All** do the same as
+Cmd-X, Cmd-C, Cmd-V, and Cmd-A.
+
+The terminal is exposed to accessibility clients, such as VoiceOver and
+selection tools that read the focused element's selected text (PopClip,
+OpenClip, dictionary lookup). It reads as a text area holding the rows on
+screen of the pane with the selection, or, without one, of the focused pane
+or open popup. Each row reads as a copy would: concealed cells as blanks and
+no trailing padding. A selection reaching rows scrolled out of view exposes
+only its visible part, though the copy still includes all of it. Copy mode's
+keyboard selection is not exposed.
 
 ## File Drops
 
@@ -1153,7 +1271,19 @@ never left the half-cell it pressed in.
 
 Plain URL detection is limited to one row within one pane; links that wrap or
 reach the right edge need explicit terminal hyperlink metadata. Other URI schemes
-and local file paths are not activated.
+are not activated.
+
+Cmd-click (Ctrl-click elsewhere) a file path a pane prints, such as
+`src/main.rs:12:5`, `./build/out`, `~/notes.md`, or a `file://` hyperlink, to
+open it with the system's default application. Holding the modifier underlines
+the path under the pointer. Relative paths resolve against the pane's working
+directory, and a path opens only if it exists; the line and column are not
+passed on. Terminal output is untrusted, so a click never launches anything:
+only a plain folder or a non-executable document (text, source, Markdown, JSON,
+images, PDF, and similar) opens itself, judged by where symlinks lead. An
+application, script, or unknown file type opens the folder that holds it, and a
+network path opens nothing. A bare name needs a location (`main.rs:3`) to count as a path, and
+paths are not detected in panes on SSH hosts, whose files live on that host.
 
 Set `open_links_in = "browser-tab"` to open links in a [browser tab](#browser-tabs)
 instead. Alt-click (Option-click on macOS) opens a link in the other target.
@@ -1581,8 +1711,9 @@ Windows setup) nothing is saved and the window says so.
   checks/reviews or an unknown merge status, and orange for a blocked/behind branch
   without a more specific check/review status. Drafts remain gray, merged PRs
   purple, and closed PRs red.
-- The header shows the selected daemon's status segments, including usage
-  percentages supplied by plugins, to the left of the Git and account controls.
+- The header, or the rightmost tab strip when tabs form the title bar, shows the
+  selected daemon's status segments, including usage percentages supplied by
+  plugins, to the left of the Git and account controls.
   Long text truncates to keep those controls reachable; status clears on disconnect.
 - The top-right titlebar profile control starts native GitHub device sign-in on
   a signed-out click, shows the authenticated user's avatar, and offers Sign out
@@ -1725,14 +1856,49 @@ Windows setup) nothing is saved and the window says so.
   daemons that advertise the method.
 - Cmd-W closes the focused pane and Cmd-Shift-W closes the focused tab only after
   a confirmation dialog (a tab asks only while an agent in it is working or
-  blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
-  Tab then Enter selects and confirms Close. Closing can terminate running
+  blocked, and never with `confirm_close_tab = false`; a pane never asks with
+  `confirm_close_pane = false`). **Cancel is selected by default**: Enter alone cancels;
+  Tab then Enter selects and confirms Close. In the pane dialog, Space toggles
+  **Do not ask again**. Closing can terminate running
   processes, unlike quitting the GUI, which only detaches.
-- Cmd-Shift-P opens the command palette with native actions and configured daemon
-  command entries, including native Themes and Reconnect actions without dedicated
-  shortcuts. Cmd-P opens **Go To** instead: every workspace on every connected
-  host, each followed by one row per agent or terminal pane with its status,
-  tab, and directory. Choosing a row on another host switches to it first.
+- Double-tap Shift or press Cmd-Shift-P to open the unified **Command Palette**:
+  workspaces on connected hosts, agents and terminal panes, native GUI actions,
+  configured daemon commands, and local project folders. Cmd-P opens the same
+  palette on **Navigation**. Choose **All**, **Navigation**, **Commands**, or
+  **Projects**, or cycle filters with Tab / Shift-Tab without clearing the search.
+  Search ranks exact names, word prefixes, substrings, then fuzzy matches; host,
+  workspace, path, status, and command ID are searchable context. Up / Down selects,
+  Enter or a click activates, and Escape or an outside click dismisses without
+  sending terminal input. Choosing a destination on another host switches to it.
+  Double-Shift requires two short completed taps within 400 ms; shifted typing,
+  mouse interaction, held Shift, other modifiers, composition, and modal dialogs
+  do not trigger it. It is window-local, not a system-wide hotkey. Native browser
+  content may handle modifier events itself; use the native menu when needed.
+- Configure project discovery in `config-gpui.local.toml`:
+
+  ```toml
+  [palette]
+  double_shift = true # false disables only this gesture
+  project_roots = ["~/Code", "$HOME/Projects"]
+  ```
+
+  The palette lists immediate non-hidden folders, not just Git repositories.
+  A leading `~`, `$VAR`, and `${VAR}` expand without shell execution. Unset
+  variables, missing roots, or discovery limits show diagnostics while other
+  sources stay usable. Scans run in the background, visit at most 8192 directory
+  entries, and list at most 2048 projects across up to 16 roots. Roots may be
+  symlinks, but child symlinks are skipped; duplicate paths are listed once.
+  Selecting a folder focuses a workspace whose first surviving pane's launch directory
+  exactly matches it, or creates one with that directory and its basename label.
+  Foreground process directories and later splits do not claim a project while
+  that first pane remains. The snapshot does not identify an original root pane;
+  after it is closed, the first surviving pane supplies this directory.
+  Local folders always open on the local connection, even while viewing SSH;
+  an unavailable local connection produces an error, never a remote creation.
+  The palette waits for the daemon's creation response before following the new
+  workspace and does not automatically trust repositories. Dismissing a queued
+  creation does not undo it. The GUI owns these settings independently of
+  `herdr-utils`; use the same root paths in both configs if desired.
 - Every native shortcut can be rebound in `config-gpui.local.toml` under
   `[keybindings]`, keyed by command name (`new_tab`, `new_workspace`,
   `split_right`, `focus_tab_1`, `quit`, ...). A value is one keystroke or a list;
@@ -1740,6 +1906,17 @@ Windows setup) nothing is saved and the window says so.
   away from its default command, keystrokes need a cmd, ctrl, alt, or fn
   modifier, and unknown names, unparseable keys, or one key on two configured
   commands reject the config. Saved changes rebind the keymap and menu bar live.
+- `[pane_keys]` maps a keystroke to the key the focused pane receives instead,
+  like Ghostty's `text:` binds. On macOS, Cmd-Left, Cmd-Right, and
+  Cmd-Backspace send Ctrl-A, Ctrl-E, and Ctrl-U by default, so zsh and agent
+  prompts jump to the line's ends or delete back to its start as in every
+  other Mac terminal. A value is a key a terminal can receive (`ctrl-a`,
+  `home`, `alt-b`, `shift-enter`), and an empty string removes a default. A
+  pane key takes its keystroke from a default or daemon command, so
+  `"cmd-k" = "ctrl-l"` replaces Clear; listing it under `[keybindings]` as well
+  rejects the config, as do a bare character, an unknown key, or a target with
+  cmd. The find field and dialogs answer Cmd-Left, Cmd-Right, Cmd-Backspace,
+  and Cmd-Delete themselves.
 - The daemon's own `[keys]` table in `config.toml` (resolved like
   `[ui.toast.clipboard]` above) applies in the GUI too, Herdr's defaults
   included, so a TUI habit such as `prefix+v` or `alt+1..9` works in both
@@ -1794,7 +1971,7 @@ Windows setup) nothing is saved and the window says so.
   section, or key combination. Preferences, keybinds, theme/palette pickers, and
   close confirmations use themed centered modals and configured UI fonts;
   modal input does not reach the terminal.
-- Creation omits `cwd`, labels, environment overrides, and split ratio: the
+- Ordinary creation shortcuts omit `cwd`, labels, environment overrides, and split ratio: the
   daemon applies its existing defaults and directory policy. Workspace creation
   supplies the currently focused source workspace when available; tabs and splits
   target the current workspace/pane explicitly. An empty session can create a

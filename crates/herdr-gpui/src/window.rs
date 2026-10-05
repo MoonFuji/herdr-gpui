@@ -8,7 +8,9 @@ mod clipboard;
 mod commands;
 mod config_diagnostic;
 mod copy_mode;
+mod double_shift;
 mod file_drop;
+mod file_links;
 mod find;
 mod flash;
 pub(crate) use flash::Flash;
@@ -21,6 +23,7 @@ pub(crate) use links::PressedLink;
 mod mouse;
 mod pending_input;
 mod prefix;
+mod regions;
 mod render;
 mod selection;
 mod server_keys;
@@ -133,6 +136,8 @@ pub(crate) struct HerdrWindow {
     /// The frame on screen, kept across the gap between two projections.
     pub(crate) presentation: Presentation,
     pub(crate) painter: std::rc::Rc<std::cell::RefCell<terminal_painter::TerminalPainter>>,
+    /// The terminal grid's cached regions; see `regions`.
+    pub(crate) regions: Vec<regions::RegionLayers>,
     pub(crate) marked: String,
     /// The sidebar row the pointer is resting on, waiting to open its menu.
     pub(crate) hover: Option<sidebar::HoverRest>,
@@ -148,9 +153,19 @@ pub(crate) struct HerdrWindow {
     pub(crate) teleport_marks: crate::teleport::Marks,
     /// The workspace a finished teleport keeps steering to until focused.
     pub(crate) teleport_follow: Option<crate::teleport::Follow>,
+    /// A prompt fanned out to several agents; once launched it outlives its
+    /// dialog so the lanes can be compared later.
+    pub(crate) fan_out: Option<crate::fan_out::FanOut>,
     pub(crate) git: git::Git,
+    /// Comment, merge, and review reads for the focused branch's open PR.
+    pub(crate) pr_actions: crate::pr_actions::Actions,
     pub(crate) usage: crate::usage::Usage,
     pub(crate) system_load: crate::system_load::SystemLoad,
+    /// Remote ports forwarded to this machine; they end with the window.
+    pub(crate) port_forwards: crate::port_forward::PortForwards,
+    pub(crate) listening_ports: crate::listening_ports::ListeningPorts,
+    /// SSH tunnels to remote ports that listen on their host's loopback only.
+    pub(crate) tunnels: crate::listening_ports::Tunnels,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     /// Expanded; collapsed leaves the rail or nothing, as Herdr's
@@ -204,6 +219,7 @@ pub(crate) struct HerdrWindow {
     pub(crate) resize_mode: bool,
     /// The selected device's server keymap, when it opted into one.
     pub(crate) server_keys: Option<server_keys::ServerKeymap>,
+    pub(super) shift_taps: double_shift::ShiftTaps,
     pub(crate) _prefix_interceptor: Subscription,
 }
 
@@ -373,6 +389,7 @@ impl HerdrWindow {
         self.poll_file_transfer(cx);
         self.update_workspace_dialog(window, cx);
         self.poll_teleport(window, cx);
+        self.poll_fan_out(window, cx);
         self.poll_device_setup(window, cx);
         self.poll_worktree_source(cx);
         self.poll_hover_menu(std::time::Instant::now(), window, cx);
@@ -381,6 +398,7 @@ impl HerdrWindow {
         }
         self.poll_tab_rename(window, cx);
         self.poll_pane_rename(window, cx);
+        self.poll_pane_processes(cx);
         if old_pane
             != self
                 .live
@@ -397,10 +415,14 @@ impl HerdrWindow {
         if self.update_git() {
             cx.notify();
         }
-        if self.update_usage() {
+        if self.update_usage(cx) {
             cx.notify();
         }
         if self.update_system_load() {
+            cx.notify();
+        }
+        self.update_port_forwards(cx);
+        if self.update_listening_ports() {
             cx.notify();
         }
         if self.live.missing_installation && !self.install_warning_shown {
@@ -408,13 +430,14 @@ impl HerdrWindow {
             self.show_install_modal(window, cx);
         }
         self.resize();
+        self.refresh_palette(window, cx);
         self.report_focus();
         self.sync_window_title(window);
     }
 
     /// Plan usage follows the selected host: a remote host reports its own
     /// agents' sign-ins, never this machine's.
-    fn update_usage(&mut self) -> bool {
+    fn update_usage(&mut self, cx: &mut Context<Self>) -> bool {
         let host = self
             .config
             .usage
@@ -422,25 +445,54 @@ impl HerdrWindow {
             .then(|| self.endpoints.get(self.selected_endpoint))
             .flatten()
             .and_then(|endpoint| crate::usage::Host::of(&endpoint.connection.target));
-        self.usage.poll(
+        let granted = crate::usage::KeychainGrants::granted(cx);
+        let changed = self.usage.poll(
             host,
             &self.config.usage,
+            &granted,
             self.config_load_revision,
             self.active,
             std::time::Instant::now(),
-        )
+        );
+        // A denied prompt takes the grant back, so a later launch does not
+        // ask again in the background.
+        for provider in self.usage.take_denied() {
+            crate::usage::KeychainGrants::revoke(provider, cx);
+        }
+        changed
     }
 
-    /// CPU and memory are sampled for every enabled host: this machine
-    /// always, a remote host while it is connected, so a dropped host is not
-    /// dialled every few seconds.
+    /// CPU and memory are sampled for every enabled host.
     fn update_system_load(&mut self) -> bool {
-        let hosts = self
-            .config
-            .show_system_load
-            .then_some(self.endpoints.iter().enumerate())
-            .into_iter()
-            .flatten()
+        if !self.config.show_system_load {
+            return self.system_load.poll(Vec::new());
+        }
+        let hosts = self.watched_hosts();
+        self.system_load.poll(hosts)
+    }
+
+    /// Listening ports are scanned on the same hosts as CPU and memory.
+    fn update_listening_ports(&mut self) -> bool {
+        if !self.config.show_listening_ports {
+            self.tunnels = Default::default();
+            return self.listening_ports.poll(Vec::new());
+        }
+        let hosts = self.watched_hosts();
+        let changed = self.listening_ports.poll(hosts);
+        // A tunnel lives as long as its remote port is listed.
+        let ports = &self.listening_ports;
+        self.tunnels
+            .retain(|key| ports.listening(&crate::usage::Host::Ssh(key.target.clone()), key.port));
+        changed
+    }
+
+    /// The machines background monitors watch: this one always, a remote
+    /// host while it is connected, so a dropped host is not dialled every
+    /// few seconds.
+    fn watched_hosts(&self) -> Vec<crate::usage::Host> {
+        self.endpoints
+            .iter()
+            .enumerate()
             .filter(|(index, endpoint)| {
                 let live = if *index == self.selected_endpoint {
                     &self.live
@@ -451,8 +503,35 @@ impl HerdrWindow {
                     && (live.status.is_connected()
                         || !matches!(endpoint.connection.target, ConnectTarget::Ssh { .. }))
             })
-            .filter_map(|(_, endpoint)| crate::usage::Host::of(&endpoint.connection.target));
-        self.system_load.poll(hosts)
+            .filter_map(|(_, endpoint)| crate::usage::Host::of(&endpoint.connection.target))
+            .collect()
+    }
+
+    /// Forwards outlive a dropped connection, since SSH may still reach the
+    /// host, but end once their host is removed or disabled. A report the
+    /// user did not just ask for is flashed.
+    pub(crate) fn update_port_forwards(&mut self, cx: &mut Context<Self>) {
+        let endpoints = &self.endpoints;
+        let mut changed = self.port_forwards.retain_hosts(|target| {
+            endpoints.iter().any(|endpoint| {
+                endpoint.enabled
+                    && endpoint
+                        .saved_ssh()
+                        .is_some_and(|(saved, _)| saved == target)
+            })
+        });
+        let notices = self.port_forwards.poll();
+        if let Some(notice) = notices.last() {
+            let flash = match notice {
+                crate::port_forward::Notice::Listening { .. } => Flash::success(notice.text()),
+                crate::port_forward::Notice::Ended { .. } => Flash::warning(notice.text()),
+            };
+            self.show_flash(flash, cx);
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// The machine the selected endpoint runs on.
@@ -576,6 +655,7 @@ impl HerdrWindow {
             flash: None,
             presentation: Default::default(),
             painter: Default::default(),
+            regions: Vec::new(),
             marked: String::new(),
             hover: None,
             hover_menu: None,
@@ -585,9 +665,14 @@ impl HerdrWindow {
             teleport: None,
             teleport_marks: crate::teleport::Marks::start(),
             teleport_follow: None,
+            fan_out: None,
             git: git::Git::default(),
+            pr_actions: Default::default(),
             usage: Default::default(),
             system_load: Default::default(),
+            port_forwards: Default::default(),
+            listening_ports: Default::default(),
+            tunnels: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,
@@ -620,12 +705,14 @@ impl HerdrWindow {
             prefix_armed: false,
             resize_mode: false,
             server_keys: None,
+            shift_taps: Default::default(),
             _prefix_interceptor: Self::intercept_prefix(window, cx),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
                 if this.active {
                     this.publish_server_keymap(cx);
                 } else {
+                    this.shift_taps.cancel();
                     this.disarm_prefix();
                     this.cancel_terminal_mouse(cx);
                     // A drag cut short is dropped; a selection kept for an
@@ -640,9 +727,17 @@ impl HerdrWindow {
             }),
             _appearance: cx.observe_window_appearance(window, |this, _, cx| {
                 this.apply_shared_theme(cx);
+                this.apply_system_theme(cx);
                 cx.notify();
             }),
         };
+        // Quitting need not drop this window, so its SSH children are killed
+        // here rather than left forwarding after the app is gone.
+        cx.on_app_quit(|this, _| {
+            this.port_forwards.stop_all();
+            async {}
+        })
+        .detach();
         #[cfg(feature = "integration-test")]
         if sidebar_test {
             this._poll = Task::ready(());
