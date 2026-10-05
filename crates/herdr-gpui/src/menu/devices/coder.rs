@@ -1,31 +1,26 @@
-//! "Add Coder Workspace": sign in to the configured deployment, pick a
-//! template and preset (or an existing workspace), wait for it, and, after
-//! explicit approval, install Herdr there. Jobs run through `coder::worker`, so
-//! closing the dialog cancels the job and discards anything it still sends.
+//! "Add Coder Workspace": sign in to the configured deployment and pick a
+//! template and preset (or an existing workspace). Creating hands the work to
+//! a window-level job (see `provisions`) and closes the dialog at once, so a
+//! slow build never blocks the next one. The dialog's own jobs (sign-in,
+//! listing, presets, removal) run through `coder::worker` and stop with it.
 
-use super::super::Page;
+use super::{super::Page, provisions::Request};
 use crate::{
     HerdrWindow,
     coder::{
-        Preset, Progress, SavedWorkspace, Settings, Template, Workspace,
-        setup::{self, Account, Ready, Source, Step},
+        Preset, Settings, Template, Workspace,
+        setup::{self, Account, Source},
         worker,
     },
     search_input::SearchInput,
 };
 use gpui::{prelude::*, *};
 
-const SESSION: &str = "default";
-
 enum Update {
     SignedIn(crate::coder::Result<bool>),
     Opened(String),
     Account(crate::coder::Result<Account>),
     Presets(String, crate::coder::Result<Vec<Preset>>),
-    Step(Step),
-    Provisioned(crate::coder::Result<(Ready, bool)>),
-    Installed(crate::coder::Result<()>),
-    Saved(crate::coder::Result<SavedWorkspace>),
     SignedOut(crate::coder::Result<()>),
 }
 
@@ -36,10 +31,6 @@ enum Phase {
     SigningIn,
     Loading,
     Choose,
-    Working,
-    NeedsInstall,
-    Installing,
-    Done,
 }
 
 /// What the user picked as the new device's source.
@@ -59,29 +50,52 @@ pub(in crate::menu) struct Wizard {
     preset: Option<String>,
     name: Entity<SearchInput>,
     label: Entity<SearchInput>,
-    ready: Option<Ready>,
+    /// Run Herdr's installer when the workspace lacks it. On by default: the
+    /// switch is the user's approval, given before the job starts.
+    install: bool,
     status: Option<String>,
-    saved: Option<SavedWorkspace>,
     /// Dropping the job cancels it, so closing the dialog stops its work.
     job: Option<worker::Worker>,
-}
-
-fn step_text(step: &Step) -> String {
-    match step {
-        Step::Creating => "Creating the workspace…".into(),
-        Step::Waiting(Progress::Starting) => "Starting the workspace…".into(),
-        Step::Waiting(Progress::Building(status)) => format!(
-            "Waiting for the workspace ({})…",
-            format!("{status:?}").to_lowercase()
-        ),
-        Step::CheckingHerdr => "Checking for Herdr in the workspace…".into(),
-    }
 }
 
 impl HerdrWindow {
     /// Whether the Coder row belongs in the device list at all.
     pub(super) fn coder_configured(&self) -> bool {
         self.config.coder.url.is_some() || std::env::var_os("HERDR_CODER_URL").is_some()
+    }
+
+    fn coder_input(
+        &self,
+        placeholder: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Entity<SearchInput> {
+        let input = cx.new(SearchInput::new);
+        input.update(cx, |input, cx| {
+            input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+            input.set_placeholder(placeholder, cx);
+            if !text.is_empty() {
+                input.set_text_selected(text, cx);
+            }
+        });
+        input
+    }
+
+    fn new_wizard(&self, settings: Settings, phase: Phase, cx: &mut Context<Self>) -> Wizard {
+        let name = crate::coder::random_name(&settings.workspace_prefix);
+        Wizard {
+            phase,
+            account: None,
+            choice: None,
+            presets: None,
+            preset: None,
+            name: self.coder_input("Workspace name", &name, cx),
+            label: self.coder_input("Device name (defaults to the workspace name)", "", cx),
+            install: true,
+            status: None,
+            job: None,
+            settings,
+        }
     }
 
     pub(super) fn open_coder_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -94,32 +108,9 @@ impl HerdrWindow {
                 return;
             }
         };
-        let input = |placeholder: &str, cx: &mut Context<Self>| {
-            let input = cx.new(SearchInput::new);
-            input.update(cx, |input, cx| {
-                input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
-                input.set_placeholder(placeholder, cx);
-            });
-            input
-        };
-        let name = input("Workspace name", cx);
-        let label = input("Device name (optional)", cx);
         window.focus(&self.menu.focus.clone(), cx);
         self.menu.error = None;
-        self.menu.coder = Some(Wizard {
-            settings,
-            phase: Phase::Checking,
-            account: None,
-            choice: None,
-            presets: None,
-            preset: None,
-            name,
-            label,
-            ready: None,
-            status: None,
-            saved: None,
-            job: None,
-        });
+        self.menu.coder = Some(self.new_wizard(settings, Phase::Checking, cx));
         self.menu.page = Some(Page::AddCoder);
         self.coder_job(cx, |settings, _, send| {
             send(Update::SignedIn(setup::signed_in(settings)));
@@ -143,32 +134,13 @@ impl HerdrWindow {
             .unwrap(),
             saved: vec!["w1".into()],
         };
-        let input = |placeholder: &str, cx: &mut Context<Self>| {
-            let input = cx.new(SearchInput::new);
-            input.update(cx, |input, cx| {
-                input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
-                input.set_placeholder(placeholder, cx);
-            });
-            input
-        };
-        let name = input("Workspace name", cx);
-        let label = input("Device name (optional)", cx);
-        self.menu.coder = Some(Wizard {
-            settings: crate::coder::tests::settings(),
-            phase: Phase::Choose,
-            account: Some(account),
-            choice: Some(Choice::Template("t1".into())),
-            presets: Some(
-                serde_json::from_str(r#"[{"ID":"p1","Name":"Large","Default":true}]"#).unwrap(),
-            ),
-            preset: Some("p1".into()),
-            name,
-            label,
-            ready: None,
-            status: None,
-            saved: None,
-            job: None,
-        });
+        let mut wizard = self.new_wizard(crate::coder::tests::settings(), Phase::Choose, cx);
+        wizard.account = Some(account);
+        wizard.choice = Some(Choice::Template("t1".into()));
+        wizard.presets =
+            Some(serde_json::from_str(r#"[{"ID":"p1","Name":"Large","Default":true}]"#).unwrap());
+        wizard.preset = Some("p1".into());
+        self.menu.coder = Some(wizard);
         self.menu.page = Some(Page::AddCoder);
         window.focus(&self.menu.focus.clone(), cx);
         cx.notify();
@@ -228,7 +200,13 @@ impl HerdrWindow {
             Update::Account(Ok(account)) => {
                 wizard.phase = Phase::Choose;
                 wizard.status = None;
+                // Preselect the first template, so creating needs one click.
+                let first = account.templates.first().cloned();
                 wizard.account = Some(account);
+                if let Some(template) = first.filter(|_| wizard.choice.is_none()) {
+                    self.choose_coder_template(template, cx);
+                    return;
+                }
             }
             Update::Presets(template, result) => {
                 if wizard.choice == Some(Choice::Template(template)) {
@@ -244,25 +222,6 @@ impl HerdrWindow {
                     }
                 }
             }
-            Update::Step(step) => wizard.status = Some(step_text(&step)),
-            Update::Provisioned(Ok((ready, installed))) => {
-                wizard.ready = Some(ready);
-                if installed {
-                    self.save_coder(cx);
-                    return;
-                }
-                wizard.phase = Phase::NeedsInstall;
-                wizard.status = None;
-            }
-            Update::Installed(Ok(())) => {
-                self.save_coder(cx);
-                return;
-            }
-            Update::Saved(Ok(saved)) => {
-                wizard.phase = Phase::Done;
-                wizard.status = None;
-                wizard.saved = Some(saved);
-            }
             Update::SignedOut(result) => {
                 wizard.phase = Phase::SignedOut;
                 wizard.account = None;
@@ -275,41 +234,10 @@ impl HerdrWindow {
                 wizard.status = None;
                 error = Some(e);
             }
-            Update::Provisioned(Err(e)) | Update::Saved(Err(e)) => {
-                // Submitting again re-checks the workspace, so nothing is lost.
-                wizard.phase = Phase::Choose;
-                wizard.status = None;
-                error = Some(e);
-            }
-            Update::Installed(Err(e)) => {
-                wizard.phase = Phase::NeedsInstall;
-                wizard.status = None;
-                error = Some(e);
-            }
         }
         if let Some(e) = error {
             self.menu.error = Some(e.to_string());
         }
-    }
-
-    fn save_coder(&mut self, cx: &mut Context<Self>) {
-        let Some(wizard) = &mut self.menu.coder else {
-            return;
-        };
-        let Some(ready) = wizard.ready.clone() else {
-            return;
-        };
-        let label = match wizard.label.read(cx).text().trim() {
-            "" => ready.name.clone(),
-            label => label.to_owned(),
-        };
-        wizard.phase = Phase::Working;
-        wizard.status = Some("Saving the device…".into());
-        self.coder_job(cx, move |settings, _, send| {
-            send(Update::Saved(setup::save(
-                settings, &ready, &label, SESSION,
-            )));
-        });
     }
 
     fn coder_sign_in(&mut self, cx: &mut Context<Self>) {
@@ -346,14 +274,9 @@ impl HerdrWindow {
         let Some(wizard) = &mut self.menu.coder else {
             return;
         };
-        let prefix = wizard.settings.workspace_prefix.clone();
         wizard.choice = Some(Choice::Template(template.id.clone()));
         wizard.presets = None;
         wizard.preset = None;
-        let suggestion = crate::coder::suggest_name(&prefix, &template.name);
-        wizard
-            .name
-            .update(cx, |input, cx| input.set_text_selected(&suggestion, cx));
         self.menu.error = None;
         self.coder_job(cx, move |settings, _, send| {
             let id = template.id.clone();
@@ -373,13 +296,12 @@ impl HerdrWindow {
         cx.notify();
     }
 
-    fn submit_coder(&mut self, cx: &mut Context<Self>) {
+    fn submit_coder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(wizard) = &mut self.menu.coder else {
             return;
         };
         match wizard.phase {
             Phase::SignedOut => return self.coder_sign_in(cx),
-            Phase::NeedsInstall => return self.install_coder(cx),
             Phase::Choose => {}
             _ => return,
         }
@@ -401,15 +323,18 @@ impl HerdrWindow {
             cx.notify();
             return;
         }
-        let source = match choice {
+        let (name, source) = match choice {
             Choice::Existing(id) => {
                 let Some(workspace) = account.workspaces.iter().find(|w| &w.id == id) else {
                     return;
                 };
-                Source::Existing {
-                    id: workspace.id.clone(),
-                    name: workspace.name.clone(),
-                }
+                (
+                    workspace.name.clone(),
+                    Source::Existing {
+                        id: workspace.id.clone(),
+                        name: workspace.name.clone(),
+                    },
+                )
             }
             Choice::Template(id) => {
                 let Some(template) = account.templates.iter().find(|t| &t.id == id) else {
@@ -419,53 +344,53 @@ impl HerdrWindow {
                     return;
                 };
                 let name = wizard.name.read(cx).text().trim().to_owned();
-                if !crate::coder::valid_name(&name) {
-                    self.menu.error = Some(
-                        "Workspace names use lowercase letters, digits, and single hyphens (at most 32)."
-                            .into(),
-                    );
+                let problem = if !crate::coder::valid_name(&name) {
+                    Some(
+                        "Workspace names use lowercase letters, digits, and single hyphens (at most 32).",
+                    )
+                } else if account.workspaces.iter().any(|w| w.name == name) {
+                    Some("A workspace with this name already exists.")
+                } else {
+                    None
+                };
+                if let Some(problem) = problem {
+                    self.menu.error = Some(problem.into());
                     cx.notify();
                     return;
                 }
-                Source::New {
-                    name,
-                    template: template.clone(),
-                    preset: wizard
-                        .preset
-                        .as_ref()
-                        .and_then(|id| presets.iter().find(|p| &p.id == id))
-                        .cloned(),
-                }
+                (
+                    name.clone(),
+                    Source::New {
+                        name,
+                        template: template.clone(),
+                        preset: wizard
+                            .preset
+                            .as_ref()
+                            .and_then(|id| presets.iter().find(|p| &p.id == id))
+                            .cloned(),
+                    },
+                )
             }
         };
-        wizard.phase = Phase::Working;
-        wizard.ready = None;
-        wizard.status = Some("Contacting Coder…".into());
-        self.menu.error = None;
-        self.coder_job(cx, move |settings, cancelled, send| {
-            let result =
-                setup::provision(settings, source, cancelled, |step| send(Update::Step(step)));
-            send(Update::Provisioned(result));
-        });
-        cx.notify();
-    }
-
-    fn install_coder(&mut self, cx: &mut Context<Self>) {
-        let Some(wizard) = &mut self.menu.coder else {
+        if self.provisions.contains(&name) {
+            self.menu.error = Some(format!("{name} is already being added."));
+            cx.notify();
             return;
+        }
+        let request = Request {
+            settings: wizard.settings.clone(),
+            source,
+            label: wizard.label.read(cx).text().trim().to_owned(),
+            install: wizard.install,
         };
-        let Some(ready) = wizard.ready.clone() else {
-            return;
-        };
-        wizard.phase = Phase::Installing;
-        wizard.status = Some(format!("Installing Herdr in {}…", ready.name));
-        self.menu.error = None;
-        self.coder_job(cx, move |settings, cancelled, send| {
-            send(Update::Installed(setup::install(
-                settings, &ready, cancelled,
-            )));
-        });
-        cx.notify();
+        match self.start_provision(name.clone(), request, cx) {
+            // The footer's count and the picker's Adding list show progress.
+            Ok(()) => self.dismiss_menu(window, cx),
+            Err(error) => {
+                self.menu.error = Some(error.to_string());
+                cx.notify();
+            }
+        }
     }
 
     fn coder_row(
@@ -625,10 +550,6 @@ impl HerdrWindow {
         let Some(wizard) = &self.menu.coder else {
             return div();
         };
-        let signed_in = matches!(
-            wizard.phase,
-            Phase::Choose | Phase::Working | Phase::NeedsInstall | Phase::Installing | Phase::Done
-        );
         let header = div()
             .flex_none()
             .p(px(16.))
@@ -660,7 +581,7 @@ impl HerdrWindow {
                             }),
                     ),
             )
-            .when(signed_in && wizard.phase == Phase::Choose, |header| {
+            .when(wizard.phase == Phase::Choose, |header| {
                 header.child(
                     div()
                         .id("coder-sign-out")
@@ -698,15 +619,17 @@ impl HerdrWindow {
         );
         let text = |text: String| div().flex_none().text_color(rgb(theme.muted)).child(text);
         body = match wizard.phase {
-            Phase::Checking | Phase::Loading => body.child(text("Checking your Coder account…".into())),
+            Phase::Checking | Phase::Loading => {
+                body.child(text("Checking your Coder account…".into()))
+            }
             Phase::SignedOut => body.child(text(
                 "Sign in with your Coder account to create workspaces and add them as devices."
                     .into(),
             )),
             Phase::SigningIn => body,
+            // Removing a saved device names and installs nothing.
             Phase::Choose => body
                 .child(self.render_coder_choices(wizard, cx))
-                // Removing a saved device names nothing new.
                 .when(!removing, |body| {
                     body.child(
                         div()
@@ -717,16 +640,20 @@ impl HerdrWindow {
                             .child("Label")
                             .child(wizard.label.clone()),
                     )
+                    .child(self.coder_row(
+                        "coder-install",
+                        "Install Herdr if it is missing".into(),
+                        "Runs curl -fsSL https://herdr.dev/install.sh | sh in the workspace; the installer verifies the release checksum".into(),
+                        wizard.install,
+                        cx,
+                        |this, cx| {
+                            if let Some(wizard) = &mut this.menu.coder {
+                                wizard.install = !wizard.install;
+                            }
+                            cx.notify();
+                        },
+                    ))
                 }),
-            Phase::Working | Phase::Installing => body,
-            Phase::NeedsInstall => body.child(text(format!(
-                "Herdr is not installed in {}. Herdr can run its official installer there (curl -fsSL https://herdr.dev/install.sh | sh), which verifies the release checksum and installs to ~/.local/bin.",
-                wizard.ready.as_ref().map_or("the workspace", |ready| ready.name.as_str())
-            ))),
-            Phase::Done => body.child(text(format!(
-                "Added {}. It appears in the device picker and connects automatically.",
-                wizard.saved.as_ref().map_or("the workspace", |saved| saved.label.as_str())
-            ))),
         };
         if let Some(status) = &wizard.status {
             body = body.child(div().flex_none().child(status.clone()));
@@ -751,11 +678,7 @@ impl HerdrWindow {
                 wizard.choice.is_some()
                     && !matches!(wizard.choice, Some(Choice::Template(_)) if wizard.presets.is_none()),
             ),
-            Phase::NeedsInstall => ("Install Herdr", true),
-            Phase::Installing => ("Installing…", false),
-            Phase::Checking | Phase::Loading | Phase::Working => ("Working…", false),
-            // Done closes the dialog, so it reads as enabled.
-            Phase::Done => ("Done", true),
+            Phase::Checking | Phase::Loading => ("Working…", false),
         };
         div()
             .debug_selector(|| "coder-setup-dialog".into())
@@ -788,15 +711,8 @@ impl HerdrWindow {
                             .when(!ready, |button| button.text_color(rgb(theme.muted)))
                             .child(label)
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                if this
-                                    .menu
-                                    .coder
-                                    .as_ref()
-                                    .is_some_and(|w| w.phase == Phase::Done)
-                                {
-                                    this.dismiss_menu(window, cx);
-                                } else if ready {
-                                    this.submit_coder(cx);
+                                if ready {
+                                    this.submit_coder(window, cx);
                                 }
                             })),
                     ),
@@ -827,7 +743,7 @@ impl HerdrWindow {
                 };
                 window.focus(&next, cx);
             }
-            "enter" => self.submit_coder(cx),
+            "enter" => self.submit_coder(window, cx),
             "escape" => self.dismiss_menu(window, cx),
             _ => return false,
         }

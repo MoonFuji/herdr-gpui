@@ -263,15 +263,24 @@ saved Coder devices with a Remove action. A secret set in the config file or
 Once Coder is configured, the device picker also offers **Add Coder Workspace…**. It signs in with Coder's
 OAuth2 provider (authorization code with PKCE; the browser returns to the
 configured loopback redirect), then lists the account's templates, their presets,
-and existing workspaces. Choosing a template creates a workspace; choosing an
-existing one attaches it. The dialog waits until the workspace agent is ready.
+and existing workspaces. It opens with the first template, its default preset,
+and a random `prefix-adjective-noun` name already chosen, so creating takes one
+click; choosing an existing workspace attaches it instead.
 
-Templates need not include Herdr. When the workspace has none, the dialog asks
-before running Herdr's published installer (`curl -fsSL https://herdr.dev/install.sh | sh`)
-inside the workspace, which verifies the release checksum and installs to
-`~/.local/bin`. This is the only remote installation the GUI performs, and only
-after that explicit approval; reconnects never install anything. A workspace
-without `curl` must get Herdr another way.
+Creating or attaching runs in the background: the dialog closes at once and can
+start another while earlier ones are still building. The devices icon in the
+footer counts the workspaces being added, the device picker lists each under
+**Adding** with its latest status (creating, building, installing Herdr), and a
+toast reports each one ready to use, or why it was not added. Closing the window
+cancels unfinished jobs.
+
+Templates need not include Herdr. The dialog's **Install Herdr if it is missing**
+switch, on by default, is the approval to run Herdr's published installer
+(`curl -fsSL https://herdr.dev/install.sh | sh`) inside the new workspace, which
+verifies the release checksum and installs to `~/.local/bin`. This is the only
+remote installation the GUI performs, and only with that approval; reconnects
+never install anything. With the switch off, a workspace without Herdr is not
+added. A workspace without `curl` must get Herdr another way.
 
 Coder devices are stored in the GUI's own `coder-workspaces.json` in its state
 directory, because Herdr's `endpoints.json` schema is SSH-only. They connect by

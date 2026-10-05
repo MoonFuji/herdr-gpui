@@ -39,6 +39,7 @@ mod worktree_tests;
 
 /// Only builds that show pages, and tests, ask what a menu covers.
 #[cfg(any(target_os = "macos", windows, test))]
+pub(crate) use devices::Provisions;
 pub(crate) use state::Cover;
 pub(crate) use {
     colors::{accent, danger, online, teleported, tint},

@@ -175,6 +175,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) checkpoints: crate::checkpoint::Checkpoints,
     /// Remote ports forwarded to this machine; they end with the window.
     pub(crate) port_forwards: crate::port_forward::PortForwards,
+    /// Coder workspaces being created or attached; see `menu::Provisions`.
+    pub(crate) provisions: menu::Provisions,
     pub(crate) listening_ports: crate::listening_ports::ListeningPorts,
     /// SSH tunnels to remote ports that listen on their host's loopback only.
     pub(crate) tunnels: crate::listening_ports::Tunnels,
@@ -740,6 +742,7 @@ impl HerdrWindow {
             system_load: Default::default(),
             checkpoints: Default::default(),
             port_forwards: Default::default(),
+            provisions: Default::default(),
             listening_ports: Default::default(),
             tunnels: Default::default(),
             install_warning_shown: false,

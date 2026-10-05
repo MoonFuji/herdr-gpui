@@ -35,3 +35,24 @@ fn suggestions_are_always_valid() {
         assert!(valid(&suggest("herdr", &label)), "{label}");
     }
 }
+
+#[test]
+fn random_names_are_valid_and_vary() {
+    let names: std::collections::HashSet<_> = (0..64).map(|_| random("herdr")).collect();
+    assert!(
+        names.len() > 32,
+        "names should rarely repeat: {}",
+        names.len()
+    );
+    for name in &names {
+        assert!(valid(name), "{name}");
+        assert!(name.starts_with("herdr-"));
+    }
+    // The longest allowed prefix still yields a valid name.
+    for _ in 0..64 {
+        assert!(valid(&random(&"p".repeat(16))));
+    }
+    for (adjective, noun) in ADJECTIVES.iter().zip(NOUNS) {
+        assert!(valid(adjective) && valid(noun));
+    }
+}

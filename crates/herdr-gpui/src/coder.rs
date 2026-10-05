@@ -21,9 +21,12 @@ pub(crate) use {
     api::{Preset, Progress, Template, Workspace},
     catalog::{SavedWorkspace, load as load_workspaces},
     connect::connect,
-    names::{suggest as suggest_name, valid as valid_name},
+    names::{random as random_name, valid as valid_name},
     settings::Settings,
 };
+
+#[cfg(test)]
+pub(crate) use api::BuildStatus;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

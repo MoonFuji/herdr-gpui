@@ -445,6 +445,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         system_load: Default::default(),
         checkpoints: Default::default(),
         port_forwards: Default::default(),
+        provisions: Default::default(),
         listening_ports: Default::default(),
         tunnels: Default::default(),
         sidebar_visible: true,

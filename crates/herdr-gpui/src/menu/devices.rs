@@ -4,10 +4,12 @@
 mod add_device;
 pub(super) mod coder;
 mod host_menu;
+mod provisions;
 mod setup;
 
 pub(super) use add_device::Setup;
 pub(crate) use host_menu::HostMenu;
+pub(crate) use provisions::Provisions;
 
 use super::{Page, colors};
 use crate::{Command, HerdrWindow};
@@ -120,11 +122,37 @@ impl HerdrWindow {
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(self.theme.active)))
                     .child(
-                        svg()
-                            .path("icons/devices.svg")
-                            .size(px(16.))
+                        div()
+                            .relative()
                             .flex_none()
-                            .text_color(rgb(self.theme.foreground)),
+                            .child(
+                                svg()
+                                    .path("icons/devices.svg")
+                                    .size(px(16.))
+                                    .text_color(rgb(self.theme.foreground)),
+                            )
+                            // How many Coder workspaces are still being added,
+                            // on the icon's corner so the label keeps its room.
+                            .when(!self.provisions.is_empty(), |icon| {
+                                icon.child(
+                                    div()
+                                        .debug_selector(|| "device-footer-adding".into())
+                                        .absolute()
+                                        .top(px(-6.))
+                                        .right(px(-8.))
+                                        .min_w(px(13.))
+                                        .h(px(13.))
+                                        .px(px(3.))
+                                        .rounded_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(px(9.))
+                                        .bg(colors::accent(&self.theme))
+                                        .text_color(rgb(self.theme.background))
+                                        .child(self.provisions.len().to_string()),
+                                )
+                            }),
                     )
                     .child(div().flex_1().min_w_0().truncate().child(label.to_owned()))
                     .child(
@@ -406,6 +434,47 @@ impl HerdrWindow {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.choose_device(index, window, cx);
                     })),
+            );
+        }
+        // Workspaces still being added: progress only, not selectable rows,
+        // so keyboard navigation keeps its indices.
+        if !self.provisions.is_empty() {
+            view = view.child(
+                div()
+                    .p(px(8.))
+                    .text_color(rgb(self.theme.muted))
+                    .child("ADDING"),
+            );
+        }
+        for (index, provision) in self.provisions.iter().enumerate() {
+            view = view.child(
+                div()
+                    .debug_selector(move || format!("device-adding-{index}"))
+                    .p(px(8.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().child(provision.name.clone()))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(self.config.ui.size * 0.85))
+                                    .text_color(rgb(self.theme.muted))
+                                    .child(format!("Coder · {}", provision.status)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .size(px(7.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(colors::accent(&self.theme)),
+                    ),
             );
         }
         view
