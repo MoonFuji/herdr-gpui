@@ -53,7 +53,9 @@ pub(crate) fn host_for(target: &ConnectTarget, live: &crate::LiveState) -> Optio
         ConnectTarget::Local | ConnectTarget::Session { .. } => {
             live.local_daemon_peer.then_some(Host::Local)
         }
-        ConnectTarget::Socket(_) => None,
+        // A Coder workspace is reached only through `coder ssh`, which host
+        // scripts do not run over.
+        ConnectTarget::Socket(_) | ConnectTarget::Coder { .. } => None,
     }
 }
 
