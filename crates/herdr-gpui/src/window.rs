@@ -23,6 +23,7 @@ pub(crate) use links::PressedLink;
 mod mouse;
 mod pending_input;
 mod prefix;
+mod reconnecting;
 mod regions;
 mod render;
 mod selection;
@@ -135,6 +136,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) flash: Option<(Flash, std::time::Instant)>,
     /// The frame on screen, kept across the gap between two projections.
     pub(crate) presentation: Presentation,
+    /// Tells a sleep from the clocks, so connections are checked on waking.
+    pub(crate) wake: endpoint::WakeClock,
     pub(crate) painter: std::rc::Rc<std::cell::RefCell<terminal_painter::TerminalPainter>>,
     /// The terminal grid's cached regions; see `regions`.
     pub(crate) regions: Vec<regions::RegionLayers>,
@@ -670,6 +673,7 @@ impl HerdrWindow {
             copy_mode: None,
             flash: None,
             presentation: Default::default(),
+            wake: endpoint::WakeClock::new(std::time::Instant::now(), std::time::SystemTime::now()),
             painter: Default::default(),
             regions: Vec::new(),
             marked: String::new(),

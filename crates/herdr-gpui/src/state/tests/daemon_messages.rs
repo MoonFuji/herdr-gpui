@@ -56,6 +56,7 @@ fn keyboard_report_all_follows_the_daemon_and_ends_with_the_connection() {
     assert!(state.only_surface_changed(&next));
     state.apply(ClientEvent::Disconnected {
         reason: "gone".into(),
+        ssh: None,
     });
     assert!(!state.keyboard_report_all);
 }
@@ -145,6 +146,7 @@ fn bells_count_only_while_connected_and_reset_with_the_connection() {
     state.apply(title());
     state.apply(ClientEvent::Disconnected {
         reason: "gone".into(),
+        ssh: None,
     });
     assert_eq!((state.bells, state.window_title.as_deref()), (0, None));
 

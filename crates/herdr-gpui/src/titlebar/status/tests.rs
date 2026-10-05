@@ -154,6 +154,7 @@ fn endpoint_status_replaces_and_disconnect_clears() {
     assert_eq!(StatusText::live(&live).text, "Remote usage");
     live.apply(herdr_client::ClientEvent::Disconnected {
         reason: herdr_client::Error::Disconnected.to_string(),
+        ssh: None,
     });
     assert!(StatusText::live(&live).text.is_empty());
 }

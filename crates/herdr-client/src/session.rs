@@ -7,7 +7,10 @@ use crate::{
     event::{ClientEvent, deliver},
     frame::FrameReader,
     handle::Command,
-    limits::{COMMAND_TIMEOUT, MAX_RESPONSE_BYTES, POLL, SLOW_REQUEST, TIMEOUT},
+    limits::{
+        COMMAND_TIMEOUT, LIVENESS_TIMEOUT, MAX_RESPONSE_BYTES, PING_TIMEOUT, POLL, SLOW_REQUEST,
+        TIMEOUT,
+    },
     method::Method,
     options::ConnectOptions,
     protocol::{endpoint::*, *},
@@ -61,25 +64,45 @@ impl From<&EndpointServerWelcome> for SurfaceEncodings {
 
 pub(crate) struct Health {
     pub(crate) received: Instant,
-    pub(crate) ping: Option<Instant>,
+    /// The outstanding ping, and the instant it fails the link unanswered.
+    pub(crate) ping: Option<(Instant, Instant)>,
 }
 impl Health {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            received: now,
+            ping: None,
+        }
+    }
     pub(crate) fn received(&mut self, now: Instant) {
         self.received = now;
         self.ping = None;
     }
+    /// Ask the link to prove itself within `LIVENESS_TIMEOUT`, sooner than a
+    /// quiet link's routine ping. Returns whether a new ping must be sent; one
+    /// already outstanding only has its deadline brought forward.
+    pub(crate) fn probe(&mut self, now: Instant) -> bool {
+        let deadline = now + LIVENESS_TIMEOUT;
+        match &mut self.ping {
+            Some((_, due)) => {
+                *due = (*due).min(deadline);
+                false
+            }
+            None => {
+                self.ping = Some((now, deadline));
+                true
+            }
+        }
+    }
     pub(crate) fn tick(&mut self, now: Instant) -> Result<bool> {
-        if self
-            .ping
-            .is_some_and(|sent| now.saturating_duration_since(sent) >= Duration::from_secs(10))
-        {
+        if self.ping.is_some_and(|(_, due)| now >= due) {
             tracing::warn!(category = "health_check", "client timeout");
             return Err(Error::HealthTimeout);
         }
         if self.ping.is_none()
             && now.saturating_duration_since(self.received) >= Duration::from_secs(5)
         {
-            self.ping = Some(now);
+            self.ping = Some((now, now + PING_TIMEOUT));
             return Ok(true);
         }
         Ok(false)
@@ -159,6 +182,15 @@ impl Session {
     }
 }
 
+/// What the caller's handle tells the worker between commands.
+#[derive(Clone, Copy)]
+pub(crate) struct Signals<'a> {
+    /// Ends the connection without flushing or replaying anything.
+    pub(crate) stop: &'a AtomicBool,
+    /// Asks an SSH link for an immediate health probe.
+    pub(crate) liveness: &'a AtomicBool,
+}
+
 pub(crate) fn run_connection(
     mut stream: Stream,
     options: ConnectOptions,
@@ -166,8 +198,9 @@ pub(crate) fn run_connection(
     remote: bool,
     commands: CommandReceiver,
     tx: &Sender<ClientEvent>,
-    stop: &AtomicBool,
+    signals: Signals<'_>,
 ) -> Result<()> {
+    let Signals { stop, liveness } = signals;
     stream.set_read_timeout(Some(POLL))?;
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;
     let hello = EndpointClientHello {
@@ -213,18 +246,20 @@ pub(crate) fn run_connection(
         }
         // A probe is a frame too: never insert one into a partial image frame.
         // Preparation does not suppress probes; actual writes have their own deadline.
-        if !partial_image
-            && let Some(health) = &mut session.health
-            && health.tick(Instant::now())?
-        {
-            write_message(
-                &mut stream,
-                &ClientMessage::EndpointControl {
-                    kind: "endpoint.health.ping.v1".into(),
-                    data: String::new(),
-                },
-                MAX_FRAME_SIZE,
-            )?;
+        // A liveness request waits for the same boundary rather than being lost.
+        if !partial_image && let Some(health) = &mut session.health {
+            let now = Instant::now();
+            let probe = liveness.swap(false, Ordering::AcqRel) && health.probe(now);
+            if health.tick(now)? || probe {
+                write_message(
+                    &mut stream,
+                    &ClientMessage::EndpointControl {
+                        kind: "endpoint.health.ping.v1".into(),
+                        data: String::new(),
+                    },
+                    MAX_FRAME_SIZE,
+                )?;
+            }
         }
         // Bound the batch so continuous input cannot starve reads.
         for _ in 0..16 {
@@ -374,10 +409,7 @@ impl Session {
                 if !w.capabilities.iter().any(|c| c == "health_check") {
                     return Err(Error::MissingHealthCheck);
                 }
-                *health = Some(Health {
-                    received: Instant::now(),
-                    ping: None,
-                });
+                *health = Some(Health::new(Instant::now()));
             }
             *encodings = SurfaceEncodings::from(&w);
             emit(ClientEvent::Connected(w.clone()))?;

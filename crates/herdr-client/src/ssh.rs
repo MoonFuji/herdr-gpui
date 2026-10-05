@@ -15,6 +15,9 @@ use std::{
 };
 use std::{path::Path, sync::atomic::AtomicBool};
 
+mod failure;
+pub use failure::SshFailure;
+
 #[cfg(unix)]
 const READY: &[u8] = b"herdr-remote-output-ready:1\n";
 
@@ -463,12 +466,26 @@ pub(crate) fn connect(
     command
         .stdin(Stdio::from(OwnedFd::from(child_stream.try_clone()?)))
         .stdout(Stdio::from(OwnedFd::from(child_stream)))
-        // Do not inherit a GUI terminal or collect unbounded/secret-bearing diagnostics.
-        .stderr(Stdio::null());
-    let child = SshChild(command.spawn()?);
+        // Never inherit a GUI terminal. The tail is read only to classify a
+        // failed start, then dropped; see `failure`.
+        .stderr(Stdio::piped());
+    let mut child = SshChild(command.spawn()?);
+    let stderr = match child.0.stderr.take() {
+        Some(stderr) => failure::drain(stderr)?,
+        None => return Err(Error::SshClosed),
+    };
     let started = Instant::now();
     loop {
-        let status = await_ready(&mut stream, stop, started)?;
+        let status = match await_ready(&mut stream, stop, started) {
+            Err(Error::SshClosed) => {
+                return Err(Error::SshRefused(failure::diagnose(
+                    &mut child.0,
+                    &stderr,
+                    stop,
+                )));
+            }
+            result => result?,
+        };
         if let Some(idle_timeout) = compatible_status(&status) {
             stream.write_all(if idle_timeout {
                 b"accept-idle\n"

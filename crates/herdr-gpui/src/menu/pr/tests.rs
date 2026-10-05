@@ -248,7 +248,7 @@ fn live_local_pr_lookup() {
             .expect("snapshot deadline");
         match event {
             ClientEvent::Snapshot(snapshot) => break snapshot,
-            ClientEvent::Disconnected { reason } => panic!("local connection failed: {reason}"),
+            ClientEvent::Disconnected { reason, .. } => panic!("local connection failed: {reason}"),
             _ => {}
         }
     };

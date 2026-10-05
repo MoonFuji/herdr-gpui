@@ -273,6 +273,7 @@ fn rejection_and_disconnection_answer_the_pending_request() {
     });
     let disconnected = ClientEvent::Disconnected {
         reason: "gone".into(),
+        ssh: None,
     };
     assert!(inbox.apply(disconnected).is_some());
     assert!(matches!(

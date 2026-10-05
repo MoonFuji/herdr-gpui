@@ -503,6 +503,7 @@ impl Render for HerdrWindow {
                     .size_full(),
                 ),
             )
+            .children(self.render_reconnecting(cx))
             .when_some(find_bar, |terminal, bar| terminal.child(bar))
             .when_some(copy_badge, |terminal, badge| terminal.child(badge))
             // Direct feedback for the user's own gesture, not a daemon notice:

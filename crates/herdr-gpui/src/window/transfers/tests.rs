@@ -139,7 +139,7 @@ impl Peer {
                 .unwrap()
             {
                 ClientEvent::Snapshot(_) => break,
-                ClientEvent::Disconnected { reason } => {
+                ClientEvent::Disconnected { reason, .. } => {
                     panic!("mock peer disconnected: {reason}")
                 }
                 _ => {}

@@ -31,6 +31,7 @@ fn surface_before_snapshot_is_not_retained_or_replayed() {
 
     state.apply(ClientEvent::Disconnected {
         reason: "closed".into(),
+        ssh: None,
     });
     state.apply(ClientEvent::Surface(frame));
     assert!(state.snapshot.is_none());
@@ -51,6 +52,7 @@ fn different_boot_and_disconnect_cannot_retain_old_cells() {
     state.apply(ClientEvent::Surface(surface(&snapshot)));
     state.apply(ClientEvent::Disconnected {
         reason: "closed".into(),
+        ssh: None,
     });
     assert!(state.snapshot.is_none() && state.surface.is_none());
     assert!(!state.status.is_connected());
@@ -148,6 +150,7 @@ fn surface_images_follow_the_connection_and_file_paths_stay_ignored() {
     assert!(Arc::ptr_eq(&before, &state.surface_images));
     state.apply(ClientEvent::Disconnected {
         reason: "test".into(),
+        ssh: None,
     });
     assert!(state.surface_images.is_empty());
 }

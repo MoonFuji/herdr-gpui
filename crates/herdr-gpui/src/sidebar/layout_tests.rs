@@ -492,6 +492,10 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         held_keys: Default::default(),
         file_transfer: None,
         presentation: Default::default(),
+        wake: crate::endpoint::WakeClock::new(
+            std::time::Instant::now(),
+            std::time::SystemTime::now(),
+        ),
         painter: Default::default(),
         regions: Vec::new(),
         marked: String::new(),

@@ -74,7 +74,7 @@ fn disconnect_presentation_is_sanitized_and_bounded() {
         |_, _| Err(io::Error::other("\u{1b}\n\r\t\0x".repeat(2048))),
     )
     .unwrap();
-    let ClientEvent::Disconnected { reason } = event(&client) else {
+    let ClientEvent::Disconnected { reason, .. } = event(&client) else {
         panic!("expected disconnect")
     };
     assert_eq!(reason.chars().count(), 1024);

@@ -224,6 +224,7 @@ mod tests {
         inbox.send(|| Ok("b".into())).unwrap();
         let disconnect = ClientEvent::Disconnected {
             reason: "gone".into(),
+            ssh: None,
         };
         assert!(
             inbox.apply(disconnect).is_some(),

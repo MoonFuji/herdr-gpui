@@ -3,10 +3,7 @@ use super::*;
 #[test]
 fn health_probes_quiet_hosts_and_any_complete_message_satisfies_probe() {
     let now = Instant::now();
-    let mut health = Health {
-        received: now,
-        ping: None,
-    };
+    let mut health = Health::new(now);
     assert!(!health.tick(now).unwrap());
     assert!(health.tick(now + Duration::from_secs(5)).unwrap());
     assert!(!health.tick(now + Duration::from_secs(14)).unwrap());
@@ -54,7 +51,7 @@ fn session_negotiates_remote_health_without_extending_snapshot_deadline() {
             assert!(matches!(events.as_slice(), [ClientEvent::Connected(_)]));
             assert_eq!(session.health.is_some(), remote);
             if let Some(health) = &mut session.health {
-                health.ping = Some(Instant::now());
+                health.ping = Some((Instant::now(), Instant::now() + limits::PING_TIMEOUT));
             }
             session.started = Instant::now() - TIMEOUT - POLL;
             session

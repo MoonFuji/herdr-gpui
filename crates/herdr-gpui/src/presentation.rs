@@ -9,6 +9,11 @@
 //! Keeping the last presented frame on screen until its replacement is ready
 //! removes the flash without pretending the old frame is current state.
 //!
+//! A lost connection keeps its last frame too, once the window asks it to
+//! with [`Presentation::hold`]: the endpoint reconnects in place, and the
+//! picture stays up, dimmed as stale, until the replacement connection
+//! presents its own frame or reports another boot.
+//!
 //! Retained cells are presentation only. Hit testing, input routing, and IME
 //! placement keep reading `LiveState::surface`, so a retained frame can never
 //! aim a click or a keystroke at a pane the client has already left.
@@ -30,6 +35,9 @@ pub(crate) struct Presentation {
     /// The pixels the presented frame was shown with. A retained frame keeps
     /// them, since the connection's own set follows the newest surface.
     images: Arc<SurfaceImages>,
+    /// The presented frame belongs to a connection that was lost, and stays
+    /// up only to show where the reconnecting endpoint left off.
+    stale: bool,
     #[cfg(feature = "integration-test")]
     pub(crate) probe: Probe,
 }
@@ -43,7 +51,9 @@ impl Presentation {
             Some(ready) => {
                 self.presented = Some(ready);
                 self.images = live.surface_images.clone();
+                self.stale = false;
             }
+            None if self.stale && !self.rebooted(live) => {}
             None if !self.retainable(live) => self.clear(),
             None => {
                 #[cfg(feature = "integration-test")]
@@ -72,11 +82,32 @@ impl Presentation {
                 .is_some_and(|snapshot| snapshot.boot_id == presented.boot_id)
     }
 
+    /// A daemon that restarted while the connection was down no longer has
+    /// the terminals the stale frame shows.
+    fn rebooted(&self, live: &LiveState) -> bool {
+        self.presented
+            .as_ref()
+            .zip(live.snapshot.as_ref())
+            .is_some_and(|(presented, snapshot)| presented.boot_id != snapshot.boot_id)
+    }
+
+    /// Keep the presented frame, as stale, across a lost connection until the
+    /// endpoint's next connection presents a frame of its own.
+    pub(crate) fn hold(&mut self) {
+        self.stale = self.presented.is_some();
+    }
+
+    /// Whether the frame on screen is a lost connection's, painted dimmed.
+    pub(crate) fn stale(&self) -> bool {
+        self.stale
+    }
+
     /// Forget the picture. Another connection's window is not this one's, so a
-    /// reconnect, a detach, or a switch of endpoint starts from an empty area.
+    /// detach, a retarget, or a switch of endpoint starts from an empty area.
     pub(crate) fn clear(&mut self) {
         self.presented = None;
         self.images = Default::default();
+        self.stale = false;
     }
 
     /// The frame to paint now, as `frame` chooses it, with its images.
@@ -101,93 +132,4 @@ pub struct Probe {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::state::ConnectionStatus;
-    use herdr_client::protocol::{ClientShellSnapshot, FrameData};
-
-    fn snapshot(boot: &str, revision: u64) -> Arc<ClientShellSnapshot> {
-        let mut snapshot = crate::sidebar::layout_tests::snapshot(1);
-        snapshot.boot_id = boot.into();
-        snapshot.revision = revision;
-        Arc::new(snapshot)
-    }
-
-    fn surface(boot: &str, revision: u64) -> Arc<PaneSurfaceFrame> {
-        Arc::new(PaneSurfaceFrame {
-            boot_id: boot.into(),
-            projection_revision: revision,
-            surface_revision: revision,
-            frame: FrameData {
-                cells: vec![],
-                width: 0,
-                height: 0,
-                cursor: None,
-                hyperlinks: vec![],
-                graphics: vec![],
-            },
-            panes: vec![],
-            splits: vec![],
-            popup: None,
-            graphics: Default::default(),
-        })
-    }
-
-    /// `LiveState` keeps private fields, so the fixtures below are built by
-    /// assignment rather than by struct update syntax.
-    fn connected(boot: &str, revision: u64) -> LiveState {
-        let mut live = LiveState::default();
-        live.status = ConnectionStatus::Connected;
-        live.snapshot = Some(snapshot(boot, revision));
-        live.surface = Some(surface(boot, revision));
-        live
-    }
-
-    #[test]
-    fn a_pending_projection_keeps_the_frame_already_presented() {
-        let mut presentation = Presentation::default();
-        let live = connected("boot", 7);
-        let first = live.surface.clone().unwrap();
-        assert!(Arc::ptr_eq(&presentation.frame(&live).unwrap(), &first));
-
-        // The focus fence drops the surface; the snapshot keeps its boot.
-        let mut pending = connected("boot", 7);
-        pending.surface = None;
-        assert!(Arc::ptr_eq(&presentation.frame(&pending).unwrap(), &first));
-
-        // A snapshot ahead of its surface is the same gap, not a new picture.
-        let mut ahead = connected("boot", 7);
-        ahead.snapshot = Some(snapshot("boot", 8));
-        assert!(Arc::ptr_eq(&presentation.frame(&ahead).unwrap(), &first));
-
-        let next = connected("boot", 8);
-        let replacement = next.surface.clone().unwrap();
-        assert!(Arc::ptr_eq(
-            &presentation.frame(&next).unwrap(),
-            &replacement
-        ));
-    }
-
-    #[test]
-    fn nothing_is_presented_for_another_boot_a_lost_connection_or_after_clearing() {
-        let mut presentation = Presentation::default();
-        assert!(presentation.frame(&connected("boot", 1)).is_some());
-        let mut rebooted = connected("boot", 1);
-        rebooted.snapshot = Some(snapshot("other-boot", 1));
-        rebooted.surface = None;
-        assert!(presentation.frame(&rebooted).is_none());
-
-        assert!(presentation.frame(&connected("boot", 1)).is_some());
-        let mut disconnected = connected("boot", 1);
-        disconnected.surface = None;
-        disconnected.status = ConnectionStatus::Disconnected;
-        assert!(presentation.frame(&disconnected).is_none());
-
-        assert!(presentation.frame(&connected("boot", 1)).is_some());
-        presentation.clear();
-        let mut gap = connected("boot", 1);
-        gap.surface = None;
-        assert!(presentation.frame(&gap).is_none());
-    }
-}
+mod tests;

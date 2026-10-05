@@ -145,6 +145,9 @@ pub enum Error {
     SshTimeout,
     #[error("SSH bridge closed; check host trust, authentication, and remote Herdr installation")]
     SshClosed,
+    /// `ssh` closed the bridge before it was ready, for the reason classified.
+    #[error("SSH bridge closed: {0}")]
+    SshRefused(#[source] crate::SshFailure),
     #[error("SSH startup output exceeds limit")]
     SshOutputLimit,
     #[error("remote Git directory must be an absolute path")]
@@ -304,6 +307,14 @@ impl Error {
             Self::Cancelled | Self::SshCancelled => io::ErrorKind::Interrupted,
             Self::EventReceiverDropped | Self::Disconnected => io::ErrorKind::BrokenPipe,
             Self::SocketClosed | Self::SshClosed => io::ErrorKind::UnexpectedEof,
+            Self::SshRefused(failure) => match failure {
+                crate::SshFailure::HostKey | crate::SshFailure::Auth => {
+                    io::ErrorKind::PermissionDenied
+                }
+                crate::SshFailure::Unreachable => io::ErrorKind::NotConnected,
+                crate::SshFailure::HerdrMissing => io::ErrorKind::NotFound,
+                crate::SshFailure::Other => io::ErrorKind::UnexpectedEof,
+            },
             Self::ForwardSpawn(error)
             | Self::ForwardLocalPort(error)
             | Self::ForwardControl(error) => error.kind(),

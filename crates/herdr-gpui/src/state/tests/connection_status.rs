@@ -49,6 +49,7 @@ fn missing_installation_survives_disconnect_but_clears_on_success() {
     state.missing_installation = true;
     state.apply(ClientEvent::Disconnected {
         reason: "Herdr not found".into(),
+        ssh: None,
     });
     assert!(state.missing_installation);
     state.set_outer_focus(true);
@@ -76,6 +77,7 @@ fn daemon_loader_stops_on_success_or_failure() {
     state.daemon_starting();
     state.apply(ClientEvent::Disconnected {
         reason: "startup failed".into(),
+        ssh: None,
     });
     assert_eq!(state.status, ConnectionStatus::Disconnected);
     assert_eq!(state.error.as_deref(), Some("startup failed"));
@@ -95,6 +97,7 @@ fn connection_status_and_error_priority_follow_lifecycle() {
     );
     state.apply(ClientEvent::Disconnected {
         reason: "socket closed".into(),
+        ssh: None,
     });
     assert!(!state.status.is_connected());
     assert_eq!(

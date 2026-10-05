@@ -21,7 +21,7 @@ while let Ok(event) = client.events.recv() {
             }
         }
         ClientEvent::Surface(surface) => { /* publish to GPUI via cx.update */ }
-        ClientEvent::Disconnected { reason } => break,
+        ClientEvent::Disconnected { reason, .. } => break,
         _ => {}
     }
 }
@@ -392,15 +392,24 @@ the upstream local-bin, Homebrew, and Nix roots. Each candidate is checked with
 `--session <session> remote-client-bridge`; advertised bridge idle timeouts are
 enabled. Welcome negotiation validates the actual running daemon again.
 Discovery has a 15-second deadline and bounded output; startup banners are
-removed with upstream's output-ready marker. SSH stderr is discarded rather than
-retained or exposed as potentially secret-bearing diagnostics. Disconnect reasons
+removed with upstream's output-ready marker. The bridge's SSH stderr is drained
+on its own thread for the child's life, keeping only a 4 KB tail. When the bridge
+closes before it is ready, that tail and the exit code (255 from `ssh`, 127 when
+no compatible Herdr was found) are reduced to an `SshFailure`: `HostKey`, `Auth`,
+`Unreachable`, `HerdrMissing`, or `Other`. The text itself is never retained,
+logged, or exposed, as it may name users, keys, and paths. The class is the
+source of `Error::SshRefused` and travels on `ClientEvent::Disconnected { ssh }`;
+`SshFailure::needs_user` marks the ones retrying cannot fix. Disconnect reasons
 are sanitized and capped at 1024 characters.
 
 The worker owns and kills/reaps its SSH child on every exit, including cancellation
 and handshake failure; no GUI-thread join occurs. Quiet SSH connections send
 `endpoint.health.ping.v1` after five seconds and expire ten seconds after an
-unanswered probe. Any complete inbound message satisfies a probe, independently
-of the initial-snapshot deadline. As with local connections, continuously drain
+unanswered probe. `ClientHandle::check_liveness` sends a probe at once instead,
+or brings an outstanding one's deadline forward, and that probe expires after
+three seconds; callers use it when a link may have died unnoticed, as across a
+sleep. Local connections ignore it. Any complete inbound message satisfies a
+probe, independently of the initial-snapshot deadline. As with local connections, continuously drain
 events: event backpressure pauses transport processing, including health checks.
 
 `PortForward::start(target, remote_port)` forwards a saved host's loopback port

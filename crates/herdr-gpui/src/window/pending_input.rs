@@ -6,7 +6,7 @@
 //! waits here instead of being discarded, and leaves only for the target that
 //! was focused when the gap opened.
 
-use super::HerdrWindow;
+use super::{Flash, HerdrWindow};
 use crate::{connection::ConnectionBridge, terminal::InputTarget};
 use gpui::Context;
 use herdr_client::protocol::ClientPaneInputEvent;
@@ -42,6 +42,12 @@ impl HerdrWindow {
             return;
         }
         if !self.input_ready() {
+            if self.disconnected() {
+                // Nothing typed into a lost connection is replayed into the
+                // next one: the user sees that it went nowhere.
+                self.show_flash(Flash::warning("Not connected: input not sent"), cx);
+                return;
+            }
             self.hold_input(event, cx);
             return;
         }
@@ -59,6 +65,12 @@ impl HerdrWindow {
             self.local_error = Some(format!("Input not sent: {error}"));
             cx.notify();
         }
+    }
+
+    /// Whether the selected endpoint is down or reconnecting after a drop.
+    fn disconnected(&self) -> bool {
+        !self.live.status.is_connected()
+            || self.endpoints[self.selected_endpoint].outage().is_some()
     }
 
     /// Hold input only across a projection gap on an unchanged connection.

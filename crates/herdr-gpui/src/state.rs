@@ -65,6 +65,8 @@ pub struct LiveState {
     pub(crate) surface_images: Arc<SurfaceImages>,
     pub status: ConnectionStatus,
     pub error: Option<String>,
+    /// Why `ssh` refused the bridge, when that is how the connection ended.
+    pub(crate) ssh_failure: Option<herdr_client::SshFailure>,
     pub missing_installation: bool,
     /// Same-user peer at the owned standard socket, not executable attestation.
     pub(crate) local_daemon_peer: bool,
@@ -165,6 +167,7 @@ impl Default for LiveState {
             surface_images: Default::default(),
             status: ConnectionStatus::Connecting,
             error: None,
+            ssh_failure: None,
             missing_installation: false,
             local_daemon_peer: false,
             supports_pane_clear: false,
@@ -213,6 +216,7 @@ impl LiveState {
             surface_images: _,
             status,
             error,
+            ssh_failure,
             missing_installation,
             local_daemon_peer,
             supports_pane_clear,
@@ -261,6 +265,7 @@ impl LiveState {
             && *previous_pane == self.previous_pane
             && *status == self.status
             && *error == self.error
+            && *ssh_failure == self.ssh_failure
             && *missing_installation == self.missing_installation
             && *local_daemon_peer == self.local_daemon_peer
             && *supports_pane_clear == self.supports_pane_clear
@@ -484,7 +489,8 @@ impl LiveState {
                 }
             }
             ClientEvent::SurfaceImages(images) => self.surface_images = images,
-            ClientEvent::Disconnected { reason } => {
+            ClientEvent::Disconnected { reason, ssh } => {
+                self.ssh_failure = ssh;
                 self.settings_reload = false;
                 self.notifications.clear();
                 self.cancel_sounds();

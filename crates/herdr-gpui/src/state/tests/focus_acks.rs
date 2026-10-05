@@ -28,6 +28,7 @@ fn previous_pane_follows_focus_within_one_boot() {
     state.apply(focus(Some("d"), "reboot"));
     state.apply(ClientEvent::Disconnected {
         reason: "gone".into(),
+        ssh: None,
     });
     state.apply(focus(Some("e"), "reboot"));
     assert_eq!(state.previous_pane, None);

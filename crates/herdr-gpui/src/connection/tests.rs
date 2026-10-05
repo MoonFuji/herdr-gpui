@@ -77,6 +77,7 @@ fn settings_reload_is_coalesced_consumed_once_and_connection_fenced() {
         .unwrap()
         .apply(ClientEvent::Disconnected {
             reason: "closed".into(),
+            ssh: None,
         });
     assert!(!bridge.take_settings_reload());
 }
@@ -147,7 +148,8 @@ fn integration_rejections_are_correlated_and_disconnect_revokes_capabilities() {
     assert!(
         inbox
             .apply(ClientEvent::Disconnected {
-                reason: "closed".into()
+                reason: "closed".into(),
+                ssh: None,
             })
             .is_some()
     );
@@ -270,6 +272,7 @@ fn notifications_move_once_are_bounded_and_fenced_by_replacement() {
         )));
         state.apply(ClientEvent::Disconnected {
             reason: "test".into(),
+            ssh: None,
         });
     }
     let disconnected = bridge.take_update().unwrap();
@@ -369,6 +372,7 @@ fn detach_and_reconnect_fence_old_inboxes() {
     old.lock().unwrap().missing_installation = true;
     old.lock().unwrap().apply(ClientEvent::Disconnected {
         reason: "old connection".into(),
+        ssh: None,
     });
     let detached = bridge.take_update().unwrap();
     assert_eq!(detached.status, ConnectionStatus::Detached);
@@ -384,6 +388,7 @@ fn detach_and_reconnect_fence_old_inboxes() {
     bridge.reconnect(options, false, true);
     old.lock().unwrap().apply(ClientEvent::Disconnected {
         reason: "detached connection".into(),
+        ssh: None,
     });
     let failed = bridge.take_update().unwrap();
     assert_eq!(failed.status, ConnectionStatus::Disconnected);

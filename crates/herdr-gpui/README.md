@@ -41,6 +41,18 @@ rules. `--socket` must name the binary **client** socket, not the JSON API socke
 in the single-row status bar and host rows. Endpoints reconnect independently with
 bounded backoff; Terminal > Reconnect retries the selected endpoint immediately,
 without input replay. Detach pauses retries for that endpoint until Reconnect.
+A selected host that drops stays selected while it reconnects: its last terminal
+picture stays up, dimmed, under a card with the reason and a Reconnect now button,
+until the new connection presents its own frame. Keys typed meanwhile are not sent,
+and a flash says so. Only a surface activation that fails on a live connection
+falls back to Local. The card names why SSH refused a host: an untrusted host key,
+failed authentication, an unreachable host, or no compatible Herdr installed. The
+first two and the last need the user, so those hosts wait the full 30 seconds
+between retries rather than backing off from half a second. After the machine
+sleeps (the wall clock runs ahead of the monotonic one, which stops while macOS
+and Linux are suspended), every live SSH link must answer a ping within three
+seconds or reconnect, and every dropped endpoint is dialled at once instead of
+at the end of its backoff.
 The status dot pulses amber during local daemon startup and is red when disconnected.
 Healthy connections leave the status bar quiet; connection indicators live in the
 device picker. Startup, disconnection, and operation errors remain in the status bar.

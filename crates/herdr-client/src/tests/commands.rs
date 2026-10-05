@@ -62,6 +62,7 @@ fn bounded_command_queue_and_outbound_limit_are_explicit() {
             next_request: AtomicU64::new(1),
             image_busy: Arc::new(AtomicBool::new(false)),
             last_queued_theme: Default::default(),
+            liveness: Default::default(),
         }),
     };
     assert!(matches!(
@@ -136,7 +137,7 @@ fn public_connect_delivers_shutdown_and_socket_failure() {
         },
     );
     assert!(
-        matches!(event(&client), ClientEvent::Disconnected { reason } if reason == "test shutdown")
+        matches!(event(&client), ClientEvent::Disconnected { reason, .. } if reason == "test shutdown")
     );
     let missing = connect(ConnectTarget::Socket(path), ConnectOptions::default()).unwrap();
     assert!(matches!(event(&missing), ClientEvent::Disconnected { .. }));

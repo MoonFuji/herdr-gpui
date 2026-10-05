@@ -60,6 +60,7 @@ fn daemon_status_reaches_the_sidebar_unchanged() {
     assert_status(&state, AgentStatus::Done);
     state.apply(ClientEvent::Disconnected {
         reason: "test".into(),
+        ssh: None,
     });
     state.apply(ClientEvent::Snapshot(agent_snapshot(
         AgentStatus::Done,

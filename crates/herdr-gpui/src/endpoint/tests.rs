@@ -215,6 +215,7 @@ fn notifications_clear_on_boot_change_and_disconnect() {
         .unwrap()
         .apply(ClientEvent::Disconnected {
             reason: "test".into(),
+            ssh: None,
         });
     endpoint.poll(Instant::now());
     assert!(endpoint.toasts.entries.is_empty());
@@ -426,6 +427,16 @@ fn timeout_and_return_to_local_do_not_wait_for_remote_release(cx: &mut gpui::Tes
             phase: ReleasePhase::Sent("never-acked".into()),
             boot: "boot".into(),
         });
+        // The activation budget runs only once there is a snapshot to activate.
+        {
+            let mut state = view.endpoints[view.selected_endpoint]
+                .connection
+                .inbox
+                .lock()
+                .unwrap();
+            state.snapshot = Some(Arc::new(crate::sidebar::layout_tests::snapshot(1)));
+            state.dirty = true;
+        }
         view.activation_deadline = Some(Instant::now());
         view.poll_endpoints(cx);
         assert_eq!(view.selected_endpoint, 0);

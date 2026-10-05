@@ -193,7 +193,9 @@ impl Session {
                     panic!("waiting for {label}: {error}; snapshot={:?}", self.snapshot)
                 });
             match &event {
-                ClientEvent::Disconnected { reason } => panic!("{label}: disconnected: {reason}"),
+                ClientEvent::Disconnected { reason, .. } => {
+                    panic!("{label}: disconnected: {reason}")
+                }
                 ClientEvent::CommandRejected { reason, .. } => {
                     panic!("{label}: rejected: {reason}")
                 }

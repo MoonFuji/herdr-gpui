@@ -276,6 +276,7 @@ fn disconnect_boot_and_detach_cancel_pending_and_queued_generations() {
         } else {
             state.apply(ClientEvent::Disconnected {
                 reason: "test".into(),
+                ssh: None,
             });
         }
         assert!(token.load(Ordering::Acquire));
