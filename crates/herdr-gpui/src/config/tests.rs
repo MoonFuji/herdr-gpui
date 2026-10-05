@@ -11,6 +11,7 @@ mod notification_settings;
 mod phone_settings;
 mod preferences;
 mod sidebar_settings;
+mod system_themes;
 mod themes;
 
 struct TempDirectory(PathBuf);
