@@ -2,9 +2,13 @@
 //! <https://code.claude.com/docs/en/hooks>; unknown events are recorded by name
 //! and answered with no decision, so newer Claude Code versions keep working.
 
-use crate::broker::{ASK_USER_QUESTION, Decision, EventKind, Origin, PendingRequest};
+use crate::{
+    broker::{ASK_USER_QUESTION, Decision, EventKind, Origin, PendingRequest},
+    transcript::{clip, tool_summary},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 /// Text copied into the event feed is clipped so one long turn cannot crowd
 /// out the rest of the bounded feed.
@@ -16,6 +20,8 @@ struct Common {
     session_id: String,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<PathBuf>,
     hook_event_name: String,
 }
 
@@ -28,6 +34,21 @@ enum Payload {
         tool_input: Value,
         #[serde(default)]
         tool_use_id: Option<String>,
+    },
+    PreToolUse {
+        tool_name: String,
+        #[serde(default)]
+        tool_input: Value,
+    },
+    PostToolUse {
+        tool_name: String,
+        #[serde(default)]
+        tool_input: Value,
+    },
+    PostToolUseFailure {
+        tool_name: String,
+        #[serde(default)]
+        tool_input: Value,
     },
     Notification {
         #[serde(default)]
@@ -48,17 +69,24 @@ enum Payload {
 }
 
 #[derive(Debug, PartialEq)]
-pub(crate) enum Hook {
+pub(crate) struct Hook {
+    pub(crate) origin: Origin,
+    /// Only absolute `.jsonl` paths are kept; anything else is not a
+    /// transcript the companion should open.
+    pub(crate) transcript_path: Option<PathBuf>,
+    pub(crate) action: Action,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum Action {
+    /// Wait for a decision from the phone.
     Permission {
-        origin: Origin,
         tool_name: String,
         tool_input: Value,
         tool_use_id: Option<String>,
     },
-    Event {
-        origin: Origin,
-        kind: EventKind,
-    },
+    /// Record the event and answer at once.
+    Record(EventKind),
 }
 
 impl Hook {
@@ -70,52 +98,75 @@ impl Hook {
             pane_id: pane_id.filter(|pane| !pane.is_empty()).map(str::to_owned),
             cwd: common.cwd,
         };
+        let transcript_path = common.transcript_path.filter(|path| {
+            path.is_absolute() && path.extension().is_some_and(|ext| ext == "jsonl")
+        });
+        let tool = |tool_name: String, tool_input: &Value, failed: Option<bool>| {
+            let summary = tool_summary(&tool_name, tool_input);
+            match failed {
+                None => EventKind::ToolStarted { tool_name, summary },
+                Some(failed) => EventKind::ToolFinished {
+                    tool_name,
+                    summary,
+                    failed,
+                },
+            }
+        };
         let kind = match Payload::deserialize(value)? {
             Payload::PermissionRequest {
                 tool_name,
                 tool_input,
                 tool_use_id,
             } => {
-                return Ok(Self::Permission {
-                    origin,
+                let action = Action::Permission {
                     tool_name,
                     tool_input,
                     tool_use_id,
+                };
+                return Ok(Self {
+                    origin,
+                    transcript_path,
+                    action,
                 });
             }
+            Payload::PreToolUse {
+                tool_name,
+                tool_input,
+            } => tool(tool_name, &tool_input, None),
+            Payload::PostToolUse {
+                tool_name,
+                tool_input,
+            } => tool(tool_name, &tool_input, Some(false)),
+            Payload::PostToolUseFailure {
+                tool_name,
+                tool_input,
+            } => tool(tool_name, &tool_input, Some(true)),
             Payload::Notification {
                 notification_type,
                 message,
             } => EventKind::Notification {
                 notification_type,
-                message: clip(message),
+                message: clip(&message, MAX_EVENT_TEXT),
             },
             Payload::Stop {
                 last_assistant_message,
             } => EventKind::Stopped {
-                last_assistant_message: last_assistant_message.map(clip),
+                last_assistant_message: last_assistant_message
+                    .map(|text| clip(&text, MAX_EVENT_TEXT)),
             },
             Payload::UserPromptSubmit { prompt } => EventKind::PromptSubmitted {
-                prompt: clip(prompt),
+                prompt: clip(&prompt, MAX_EVENT_TEXT),
             },
             Payload::Other => EventKind::Hook {
                 hook_event_name: common.hook_event_name,
             },
         };
-        Ok(Self::Event { origin, kind })
+        Ok(Self {
+            origin,
+            transcript_path,
+            action: Action::Record(kind),
+        })
     }
-}
-
-fn clip(mut text: String) -> String {
-    if text.len() > MAX_EVENT_TEXT {
-        let mut end = MAX_EVENT_TEXT;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-        text.push('…');
-    }
-    text
 }
 
 /// The `PermissionRequest` hook response for a decision, or `None` to let
@@ -174,43 +225,90 @@ mod tests {
         }
     }
 
+    fn parse(body: &Value, pane: Option<&str>) -> Hook {
+        Hook::parse(body.to_string().as_bytes(), pane).unwrap()
+    }
+
+    fn recorded(body: &Value) -> EventKind {
+        match parse(body, None).action {
+            Action::Record(kind) => kind,
+            action => panic!("expected an event, got {action:?}"),
+        }
+    }
+
     #[test]
-    fn parses_a_permission_request_with_its_pane() {
+    fn parses_a_permission_request_with_its_pane_and_transcript() {
         let body = json!({
             "session_id": "abc", "cwd": "/w", "hook_event_name": "PermissionRequest",
+            "transcript_path": "/home/u/.claude/projects/w/abc.jsonl",
             "tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_use_id": "t1",
             "permission_mode": "default"
         });
-        let hook = Hook::parse(body.to_string().as_bytes(), Some("p_3")).unwrap();
         assert_eq!(
-            hook,
-            Hook::Permission {
+            parse(&body, Some("p_3")),
+            Hook {
                 origin: Origin {
                     session_id: "abc".into(),
                     pane_id: Some("p_3".into()),
                     cwd: Some("/w".into()),
                 },
-                tool_name: "Bash".into(),
-                tool_input: json!({"command": "ls"}),
-                tool_use_id: Some("t1".into()),
+                transcript_path: Some("/home/u/.claude/projects/w/abc.jsonl".into()),
+                action: Action::Permission {
+                    tool_name: "Bash".into(),
+                    tool_input: json!({"command": "ls"}),
+                    tool_use_id: Some("t1".into()),
+                },
             }
         );
+    }
+
+    #[test]
+    fn keeps_only_absolute_jsonl_transcripts() {
+        for path in ["relative.jsonl", "/etc/passwd", ""] {
+            let body =
+                json!({"session_id": "s", "hook_event_name": "Stop", "transcript_path": path});
+            assert_eq!(parse(&body, None).transcript_path, None, "{path}");
+        }
     }
 
     #[test]
     fn an_empty_pane_header_means_no_pane() {
         // Claude Code interpolates an unset `$HERDR_PANE_ID` as an empty string.
         let body = json!({"session_id": "s", "hook_event_name": "Stop"});
-        let Hook::Event { origin, kind } =
-            Hook::parse(body.to_string().as_bytes(), Some("")).unwrap()
-        else {
-            panic!("Stop is an event");
-        };
-        assert_eq!(origin.pane_id, None);
+        let hook = parse(&body, Some(""));
+        assert_eq!(hook.origin.pane_id, None);
         assert_eq!(
-            kind,
-            EventKind::Stopped {
+            hook.action,
+            Action::Record(EventKind::Stopped {
                 last_assistant_message: None
+            })
+        );
+    }
+
+    #[test]
+    fn tool_hooks_become_progress_events() {
+        let event = |name: &str| json!({"session_id": "s", "hook_event_name": name, "tool_name": "Bash", "tool_input": {"command": "cargo test"}});
+        assert_eq!(
+            recorded(&event("PreToolUse")),
+            EventKind::ToolStarted {
+                tool_name: "Bash".into(),
+                summary: "cargo test".into()
+            }
+        );
+        assert_eq!(
+            recorded(&event("PostToolUse")),
+            EventKind::ToolFinished {
+                tool_name: "Bash".into(),
+                summary: "cargo test".into(),
+                failed: false
+            }
+        );
+        assert_eq!(
+            recorded(&event("PostToolUseFailure")),
+            EventKind::ToolFinished {
+                tool_name: "Bash".into(),
+                summary: "cargo test".into(),
+                failed: true
             }
         );
     }
@@ -218,11 +316,12 @@ mod tests {
     #[test]
     fn unknown_events_are_recorded_by_name() {
         let body = json!({"session_id": "s", "hook_event_name": "PreCompact", "trigger": "auto"});
-        let hook = Hook::parse(body.to_string().as_bytes(), None).unwrap();
-        assert!(matches!(
-            hook,
-            Hook::Event { kind: EventKind::Hook { hook_event_name }, .. } if hook_event_name == "PreCompact"
-        ));
+        assert_eq!(
+            recorded(&body),
+            EventKind::Hook {
+                hook_event_name: "PreCompact".into()
+            }
+        );
     }
 
     #[test]
@@ -230,11 +329,7 @@ mod tests {
         let message = "é".repeat(MAX_EVENT_TEXT);
         let body =
             json!({"session_id": "s", "hook_event_name": "Notification", "message": message});
-        let Hook::Event {
-            kind: EventKind::Notification { message, .. },
-            ..
-        } = Hook::parse(body.to_string().as_bytes(), None).unwrap()
-        else {
+        let EventKind::Notification { message, .. } = recorded(&body) else {
             panic!("Notification is an event");
         };
         assert!(message.len() <= MAX_EVENT_TEXT + '…'.len_utf8());

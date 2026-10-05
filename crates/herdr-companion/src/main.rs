@@ -1,5 +1,7 @@
 use anyhow::{Context, bail};
-use herdr_companion::{Command, Companion, Config, Limits, hooks_settings, parse_args, usage};
+use herdr_companion::{
+    Command, Companion, Config, Limits, Notifier, hooks_settings, parse_args, usage,
+};
 use std::{env, net::TcpListener, process::ExitCode, sync::Arc};
 
 /// A guessable token would let anyone who reaches the port approve commands.
@@ -56,10 +58,14 @@ fn run(command: Command) -> anyhow::Result<()> {
         );
     }
     eprintln!("herdr-companion: listening on {}", options.listen);
+    let notifier = options
+        .ntfy
+        .map(|topic| Notifier::spawn(topic, options.public_url, options.ntfy_details));
     let companion = Companion::new(Config {
         token: token.into(),
         decision_timeout: options.decision_timeout,
         herdr_socket,
+        notifier,
         limits: Limits::default(),
         max_connections: MAX_CONNECTIONS,
     });

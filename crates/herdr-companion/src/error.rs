@@ -50,4 +50,13 @@ pub enum Error {
     HerdrClosed,
     #[error("Herdr's reply exceeds its size limit")]
     HerdrReplyTooLarge,
+    #[error("Herdr's reply is missing an expected field")]
+    HerdrReplyShape,
+    #[error("send between 1 and 16 keys")]
+    KeyCount,
+    /// The rejected key name, echoed back to the client that sent it.
+    #[error("key `{0}` is not allowed")]
+    KeyNotAllowed(String),
+    #[error("no transcript is known for that session")]
+    NoTranscript,
 }

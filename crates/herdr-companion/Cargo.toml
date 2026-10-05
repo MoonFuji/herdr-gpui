@@ -1,5 +1,5 @@
 [package]
-description            = "Companion bridge that lets a phone answer Claude Code prompts for agents running in Herdr"
+description            = "Companion bridge and web app for following and answering Herdr agents from a phone"
 edition.workspace      = true
 license.workspace      = true
 name                   = "herdr-companion"
@@ -17,3 +17,7 @@ secrecy.workspace      = true
 serde.workspace        = true
 serde_json.workspace   = true
 thiserror.workspace    = true
+ureq.workspace         = true
+
+[dev-dependencies]
+tempfile.workspace = true

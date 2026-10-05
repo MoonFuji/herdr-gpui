@@ -16,6 +16,12 @@ pub struct ServeOptions {
     pub listen: SocketAddr,
     pub decision_timeout: Duration,
     pub herdr_socket: Option<PathBuf>,
+    /// An ntfy topic URL that receives push notices.
+    pub ntfy: Option<String>,
+    /// Include commands and messages in push notices, not only their kind.
+    pub ntfy_details: bool,
+    /// Where the phone reaches the web app; tapped notices open it.
+    pub public_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,8 +49,10 @@ pub fn usage() -> String {
         "herdr-companion: answer Claude Code prompts for Herdr agents from another device\n\n\
          USAGE:\n  \
          herdr-companion serve [--listen ADDR] [--decision-timeout SECS] [--herdr-socket PATH]\n  \
+                               [--ntfy URL [--ntfy-details]] [--public-url URL]\n  \
          herdr-companion hooks [--url URL] [--decision-timeout SECS]\n\n\
          `serve` reads its bearer token from {TOKEN_ENV} and listens on {DEFAULT_LISTEN} by default.\n\
+         It also serves the web app at /; open it on the phone and enter the token once.\n\
          `hooks` prints the Claude Code settings that point hooks at the companion.\n"
     )
 }
@@ -60,6 +68,9 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
     let mut url = None;
     let mut decision_timeout = Duration::from_secs(DEFAULT_DECISION_SECS);
     let mut herdr_socket = None;
+    let mut ntfy = None;
+    let mut ntfy_details = false;
+    let mut public_url = None;
     let serve = match command.to_str() {
         Some("serve") => true,
         Some("hooks") => false,
@@ -88,6 +99,11 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
             Some("--herdr-socket") if serve => {
                 herdr_socket = Some(PathBuf::from(value("--herdr-socket")?))
             }
+            Some("--ntfy") if serve => ntfy = Some(web_url(value("--ntfy")?, "--ntfy")?),
+            Some("--ntfy-details") if serve => ntfy_details = true,
+            Some("--public-url") if serve => {
+                public_url = Some(web_url(value("--public-url")?, "--public-url")?)
+            }
             Some("--url") if !serve => {
                 url = Some(
                     value("--url")?
@@ -103,6 +119,9 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
             listen,
             decision_timeout,
             herdr_socket,
+            ntfy,
+            ntfy_details,
+            public_url,
         })
     } else {
         Command::Hooks {
@@ -110,6 +129,14 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
             decision_timeout,
         }
     })
+}
+
+fn web_url(value: OsString, name: &'static str) -> Result<String, CliError> {
+    value
+        .into_string()
+        .ok()
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+        .ok_or(CliError::InvalidValue(name))
 }
 
 /// Claude Code `settings.json` hooks for the companion. The token and pane id
@@ -136,6 +163,12 @@ pub fn hooks_settings(url: &str, decision_timeout: Duration) -> Value {
             "Notification": handler(5),
             "Stop": handler(5),
             "UserPromptSubmit": handler(5),
+            "SessionStart": handler(5),
+            // Progress during a turn. They run on every tool call, so they
+            // return at once and never decide anything.
+            "PreToolUse": handler(5),
+            "PostToolUse": handler(5),
+            "PostToolUseFailure": handler(5),
         }
     })
 }
@@ -160,6 +193,7 @@ mod tests {
             Duration::from_secs(DEFAULT_DECISION_SECS)
         );
         assert_eq!(options.herdr_socket, None);
+        assert_eq!(options.ntfy, None);
     }
 
     #[test]
@@ -180,7 +214,36 @@ mod tests {
                 listen: "100.64.0.1:9000".parse().unwrap(),
                 decision_timeout: Duration::from_secs(30),
                 herdr_socket: Some("/h.sock".into()),
+                ntfy: None,
+                ntfy_details: false,
+                public_url: None,
             })
+        );
+    }
+
+    #[test]
+    fn parses_push_options() {
+        let Command::Serve(options) = parse(&[
+            "serve",
+            "--ntfy",
+            "https://ntfy.sh/t",
+            "--ntfy-details",
+            "--public-url",
+            "https://box.ts.net",
+        ])
+        .unwrap() else {
+            panic!("serve");
+        };
+        assert_eq!(options.ntfy.as_deref(), Some("https://ntfy.sh/t"));
+        assert!(options.ntfy_details);
+        assert_eq!(options.public_url.as_deref(), Some("https://box.ts.net"));
+        assert_eq!(
+            parse(&["serve", "--ntfy", "ntfy.sh/t"]),
+            Err(CliError::InvalidValue("--ntfy"))
+        );
+        assert_eq!(
+            parse(&["hooks", "--ntfy-details"]),
+            Err(CliError::Unknown("--ntfy-details".into()))
         );
     }
 
@@ -216,6 +279,7 @@ mod tests {
         let settings = hooks_settings("http://h/hooks/claude", Duration::from_secs(60));
         let permission = &settings["hooks"]["PermissionRequest"][0]["hooks"][0];
         assert_eq!(permission["timeout"], 70);
+        assert_eq!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 5);
         assert_eq!(
             permission["headers"]["Authorization"],
             "Bearer $HERDR_COMPANION_TOKEN"

@@ -156,14 +156,22 @@ fn incomplete(error: std::io::Error) -> crate::Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Response {
     pub(crate) status: u16,
+    pub(crate) content_type: &'static str,
     /// Empty means "no decision" to Claude Code, which a JSON `{}` would not.
     pub(crate) body: Vec<u8>,
 }
+
+/// Same-origin only: the web app loads nothing from elsewhere and cannot be
+/// framed, and API responses inherit the same restrictions harmlessly.
+const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'self'; img-src 'self' data:; \
+object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n\
+X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n";
 
 impl Response {
     pub(crate) fn json(status: u16, body: &serde_json::Value) -> Self {
         Self {
             status,
+            content_type: "application/json",
             body: body.to_string().into_bytes(),
         }
     }
@@ -171,7 +179,16 @@ impl Response {
     pub(crate) fn empty() -> Self {
         Self {
             status: 200,
+            content_type: "application/json",
             body: Vec::new(),
+        }
+    }
+
+    pub(crate) fn asset(content_type: &'static str, body: &[u8]) -> Self {
+        Self {
+            status: 200,
+            content_type,
+            body: body.to_vec(),
         }
     }
 
@@ -188,14 +205,23 @@ impl Response {
             405 => "Method Not Allowed",
             409 => "Conflict",
             413 => "Payload Too Large",
+            422 => "Unprocessable Content",
             502 => "Bad Gateway",
             503 => "Service Unavailable",
             _ => "Error",
         };
+        // Assets revalidate so a new binary's web app replaces the old one;
+        // API answers are live state and never cached.
+        let cache = if self.content_type == "application/json" {
+            "no-store"
+        } else {
+            "no-cache"
+        };
         write!(
             writer,
-            "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {cache}\r\n{SECURITY_HEADERS}Connection: close\r\n\r\n",
             self.status,
+            self.content_type,
             self.body.len()
         )?;
         writer.write_all(&self.body)?;
@@ -299,5 +325,7 @@ mod tests {
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(text.contains("Content-Length: 0\r\n"));
         assert!(text.ends_with("\r\n\r\n"));
+        assert!(text.contains("Cache-Control: no-store\r\n"));
+        assert!(text.contains("frame-ancestors 'none'"));
     }
 }

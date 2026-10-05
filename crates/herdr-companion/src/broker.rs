@@ -2,11 +2,12 @@
 //! hook connections that wait on a decision and the phone connections that
 //! supply one. Nothing here touches a socket, so every rule is testable alone.
 
-use crate::{Error, Result};
+use crate::{Error, Result, transcript::tool_summary};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
+    path::PathBuf,
     sync::{Condvar, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
@@ -17,13 +18,15 @@ pub const ASK_USER_QUESTION: &str = "AskUserQuestion";
 pub struct Limits {
     pub max_pending: usize,
     pub max_events: usize,
+    pub max_sessions: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
             max_pending: 64,
-            max_events: 512,
+            max_events: 1024,
+            max_sessions: 256,
         }
     }
 }
@@ -96,6 +99,7 @@ pub enum EventKind {
     PermissionRequested {
         request_id: u64,
         tool_name: String,
+        summary: String,
     },
     PermissionResolved {
         request_id: u64,
@@ -110,6 +114,15 @@ pub enum EventKind {
     },
     PromptSubmitted {
         prompt: String,
+    },
+    ToolStarted {
+        tool_name: String,
+        summary: String,
+    },
+    ToolFinished {
+        tool_name: String,
+        summary: String,
+        failed: bool,
     },
     Hook {
         hook_event_name: String,
@@ -135,6 +148,20 @@ pub struct EventPage {
     pub lost: bool,
 }
 
+/// A Claude Code session the hooks have reported, newest activity first in
+/// listings. The transcript path stays server-side; clients ask for the chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Session {
+    pub session_id: String,
+    pub pane_id: Option<String>,
+    pub cwd: Option<String>,
+    #[serde(skip)]
+    pub transcript_path: Option<PathBuf>,
+    pub has_transcript: bool,
+    /// The feed sequence of its latest hook call; orders sessions by recency.
+    pub last_seq: u64,
+}
+
 struct Slot {
     request: PendingRequest,
     decision: Option<Decision>,
@@ -146,6 +173,7 @@ struct State {
     last_seq: u64,
     pending: BTreeMap<u64, Slot>,
     events: VecDeque<Event>,
+    sessions: HashMap<String, Session>,
 }
 
 impl State {
@@ -199,6 +227,7 @@ impl Broker {
         let kind = EventKind::PermissionRequested {
             request_id: id,
             tool_name: tool_name.clone(),
+            summary: tool_summary(&tool_name, &tool_input),
         };
         state.record(self.limits.max_events, origin.clone(), kind);
         let request = PendingRequest {
@@ -287,6 +316,59 @@ impl Broker {
             .filter(|slot| slot.decision.is_none())
             .map(|slot| slot.request.clone())
             .collect()
+    }
+
+    /// Remembers which pane, directory, and transcript a session belongs to.
+    /// Fields a hook omits keep their earlier values.
+    pub fn touch_session(&self, origin: &Origin, transcript_path: Option<PathBuf>) {
+        if origin.session_id.is_empty() {
+            return;
+        }
+        let mut state = self.lock();
+        let last_seq = state.last_seq;
+        let session = state
+            .sessions
+            .entry(origin.session_id.clone())
+            .or_insert_with(|| Session {
+                session_id: origin.session_id.clone(),
+                pane_id: None,
+                cwd: None,
+                transcript_path: None,
+                has_transcript: false,
+                last_seq,
+            });
+        session.last_seq = last_seq;
+        if origin.pane_id.is_some() {
+            session.pane_id.clone_from(&origin.pane_id);
+        }
+        if origin.cwd.is_some() {
+            session.cwd.clone_from(&origin.cwd);
+        }
+        if transcript_path.is_some() {
+            session.transcript_path = transcript_path;
+            session.has_transcript = true;
+        }
+        if state.sessions.len() > self.limits.max_sessions {
+            let stalest = state
+                .sessions
+                .values()
+                .min_by_key(|session| session.last_seq)
+                .map(|session| session.session_id.clone());
+            if let Some(stalest) = stalest {
+                state.sessions.remove(&stalest);
+            }
+        }
+    }
+
+    /// Known sessions, most recently active first.
+    pub fn sessions(&self) -> Vec<Session> {
+        let mut sessions: Vec<_> = self.lock().sessions.values().cloned().collect();
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.last_seq));
+        sessions
+    }
+
+    pub fn session(&self, session_id: &str) -> Option<Session> {
+        self.lock().sessions.get(session_id).cloned()
     }
 
     pub fn record(&self, origin: Origin, kind: EventKind) {
@@ -439,6 +521,7 @@ mod tests {
         let broker = Broker::new(Limits {
             max_pending: 1,
             max_events: 8,
+            max_sessions: 8,
         });
         open(&broker, "Bash");
         assert!(matches!(
@@ -452,6 +535,7 @@ mod tests {
         let broker = Broker::new(Limits {
             max_pending: 1,
             max_events: 2,
+            max_sessions: 8,
         });
         for prompt in ["a", "b", "c"] {
             broker.record(
@@ -493,6 +577,64 @@ mod tests {
         );
         let page = poller.join().unwrap();
         assert_eq!(page.next, 1);
+    }
+
+    #[test]
+    fn sessions_remember_their_pane_and_transcript_and_stay_bounded() {
+        let broker = Broker::new(Limits {
+            max_pending: 1,
+            max_events: 8,
+            max_sessions: 2,
+        });
+        broker.touch_session(&origin(), Some("/t/s.jsonl".into()));
+        // A later hook without a pane or transcript keeps what was learned.
+        broker.record(
+            origin(),
+            EventKind::Stopped {
+                last_assistant_message: None,
+            },
+        );
+        broker.touch_session(
+            &Origin {
+                session_id: "s".into(),
+                pane_id: None,
+                cwd: Some("/w".into()),
+            },
+            None,
+        );
+        let session = broker.session("s").unwrap();
+        assert_eq!(session.pane_id.as_deref(), Some("p_1"));
+        assert_eq!(session.cwd.as_deref(), Some("/w"));
+        assert_eq!(session.transcript_path, Some(PathBuf::from("/t/s.jsonl")));
+        assert!(session.has_transcript);
+
+        for id in ["a", "b"] {
+            broker.record(
+                origin(),
+                EventKind::Stopped {
+                    last_assistant_message: None,
+                },
+            );
+            broker.touch_session(
+                &Origin {
+                    session_id: id.into(),
+                    ..Origin::default()
+                },
+                None,
+            );
+        }
+        let ids: Vec<_> = broker
+            .sessions()
+            .into_iter()
+            .map(|session| session.session_id)
+            .collect();
+        assert_eq!(ids, ["b", "a"], "the stalest session was evicted");
+        broker.touch_session(&Origin::default(), None);
+        assert_eq!(
+            broker.sessions().len(),
+            2,
+            "hooks without a session id are ignored"
+        );
     }
 
     #[test]
