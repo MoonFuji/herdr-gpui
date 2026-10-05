@@ -275,6 +275,21 @@ impl Endpoint {
                 self.toasts.entries.clear();
             }
             self.toasts.receive(state.notifications.drain(..));
+            // The worker stops the handle before its disconnect state reaches
+            // the inbox, so a drop already seen learns its reason here.
+            if self.connection.handle.is_none()
+                && self.outage.is_some()
+                && !state.status.is_connected()
+            {
+                if let Some(error) = &state.error {
+                    self.outage = Some(error.clone());
+                }
+                let needs_user =
+                    |live: &LiveState| live.ssh_failure.is_some_and(SshFailure::needs_user);
+                if needs_user(&state) && !needs_user(&self.live) {
+                    self.retry_at = self.retry_at.max(now + MAX_RETRY_DELAY);
+                }
+            }
             self.live = state;
             self.sync_live();
         }

@@ -11,9 +11,9 @@ fn a_drop_is_an_outage_until_a_connection_has_a_snapshot() {
     });
     assert!(endpoint.outage().is_some());
     assert_eq!(endpoint.status(), "reconnecting");
-    // A retry replaces `live` with a fresh attempt that has no error yet.
+    // A retry replaces `live` with a fresh attempt; the outage outlives it,
+    // whether or not that attempt has already failed.
     endpoint.connect(ConnectOptions::default(), false);
-    assert!(endpoint.live.error.is_none());
     assert!(endpoint.outage().is_some());
     assert_eq!(endpoint.status(), "reconnecting");
 
@@ -95,7 +95,11 @@ fn a_refusal_only_the_user_can_fix_waits_the_longest_retry_delay() {
             });
         endpoint.connection.handle.as_ref().unwrap().disconnect();
         let now = Instant::now();
-        endpoint.poll(now);
+        // The inbox may be busy for a poll; the state still lands on a later one.
+        wait_until(|| {
+            endpoint.poll(now);
+            endpoint.live.ssh_failure.is_some()
+        });
         let expected = if waits_longest {
             MAX_RETRY_DELAY
         } else {
@@ -147,4 +151,31 @@ fn a_stopped_handle_reads_as_reconnecting_before_its_state_arrives() {
     assert!(endpoint.live.status.is_connected(), "the gap under test");
     assert_eq!(endpoint.outage(), Some("connection lost"));
     assert_eq!(endpoint.status(), "reconnecting");
+}
+
+/// The refusal can reach the inbox a poll after the stop it explains. It must
+/// still hold the host to the longest delay, and name the reason.
+#[test]
+fn a_refusal_that_arrives_after_its_stop_still_waits_the_longest_delay() {
+    let (mut endpoint, _server) = connected_endpoint("ssh:remote");
+    endpoint.connection.handle.as_ref().unwrap().disconnect();
+    let dropped = Instant::now();
+    endpoint.poll(dropped);
+    assert_eq!(endpoint.outage(), Some("connection lost"));
+    assert_eq!(endpoint.retry_at, dropped + endpoint.retry_delay());
+
+    let error = herdr_client::Error::SshRefused(SshFailure::HostKey).to_string();
+    endpoint
+        .connection
+        .inbox
+        .lock()
+        .unwrap()
+        .apply(ClientEvent::Disconnected {
+            reason: error.clone(),
+            ssh: Some(SshFailure::HostKey),
+        });
+    let arrived = dropped + Duration::from_millis(16);
+    endpoint.poll(arrived);
+    assert_eq!(endpoint.outage(), Some(error.as_str()));
+    assert_eq!(endpoint.retry_at, arrived + MAX_RETRY_DELAY);
 }
