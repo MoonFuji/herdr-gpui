@@ -43,12 +43,31 @@ an encrypted tunnel; Tailscale is the simplest:
 
 ```sh
 tailscale serve --bg 8787        # https://<machine>.<tailnet>.ts.net
+herdr-companion serve --public-url https://<machine>.<tailnet>.ts.net
 ```
 
-Open that URL on the phone, enter the token once, and add the page to the home
+With `--public-url`, `serve` prints a QR code at startup. Scan it with the
+phone's camera and the web app opens already signed in. Then add it to the home
 screen (Safari: Share → Add to Home Screen). Installing a web app needs HTTPS,
-which `tailscale serve` provides. If you bind to a non-loopback address with
-`--listen`, the server prints a warning.
+which `tailscale serve` provides.
+
+- **What the code holds.** The code is a link to `/#token=…`. Browsers never
+  send the part after `#` to the server, so the token stays out of request
+  lines, logs, and `Referer` headers. Anyone who sees the code can use the
+  companion, so treat it like a password.
+- **When it prints.** The code is printed only when stderr is a terminal,
+  never into a log file. `--no-qr` turns it off, and
+  `herdr-companion qr --url https://<machine>.<tailnet>.ts.net` prints it again
+  on demand.
+- **Address bar.** In a browser tab the link stays in the address bar, so Add
+  to Home Screen carries the token over; an installed iOS app does not share
+  Safari's storage. The installed app removes it from the address bar once
+  it has stored the token.
+- **Terminal colours.** The code is drawn for a dark terminal background. On
+  a light background it appears inverted, which most phone cameras still read.
+- **Other addresses.** If you bind to a non-loopback address with `--listen`,
+  the server prints a warning. Without `--public-url`, it then encodes that
+  address in the QR code instead.
 
 ### Push notifications
 
@@ -76,8 +95,10 @@ the ntfy server can read them. Tapping a notice opens `--public-url`.
   client socket. If you leave it out, the companion uses `HERDR_SOCKET_PATH`,
   then the local session's socket. Routes that need Herdr answer `502` when it
   can't be reached.
-- `--ntfy URL`, `--ntfy-details`, `--public-url URL`: push notifications, as
-  described above.
+- `--public-url URL`: the address the phone uses, for the pairing QR code and
+  for tapped notices.
+- `--no-qr`: don't print the pairing QR code at startup.
+- `--ntfy URL`, `--ntfy-details`: push notifications, as described above.
 
 ## API
 

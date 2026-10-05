@@ -114,6 +114,18 @@ function showSetup(error = '') {
   $('setup-error').textContent = error;
 }
 
+// The pairing QR code opens /#token=…. Browsers never send the fragment to
+// the server. An installed iOS app keeps storage apart from Safari, so the
+// link stays in Safari's address bar for Add to Home Screen to carry over,
+// and is cleared once the token lands in the installed app's storage.
+function tokenFromLink() {
+  const token = new URLSearchParams(location.hash.slice(1)).get('token');
+  if (!token) return '';
+  const installed = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  if (installed) history.replaceState(null, '', location.pathname + location.search);
+  return token;
+}
+
 async function connect(token) {
   state.token = token;
   try {
@@ -739,8 +751,10 @@ async function start() {
     }
   });
 
+  const linked = tokenFromLink();
+  if (linked) state.token = linked;
   if (state.token && (await connect(state.token))) boot();
-  else showSetup();
+  else showSetup(linked ? 'The token in that link was refused.' : '');
   pollLoop();
   // Herdr status changes (working, idle) do not pass through the hooks.
   setInterval(() => {

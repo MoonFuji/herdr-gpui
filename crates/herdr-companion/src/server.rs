@@ -329,6 +329,8 @@ fn status_for(error: &Error) -> u16 {
         | Error::HerdrReplyTooLarge
         | Error::HerdrReplyShape
         | Error::Io(_) => 502,
+        // Pairing happens in the CLI; no route renders a QR code.
+        Error::Qr(_) => 500,
     }
 }
 

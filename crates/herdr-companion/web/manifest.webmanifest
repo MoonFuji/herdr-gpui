@@ -2,7 +2,6 @@
   "name": "Herdr Companion",
   "short_name": "Herdr",
   "description": "Answer prompts and follow the agents running in Herdr.",
-  "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "background_color": "#0f1114",

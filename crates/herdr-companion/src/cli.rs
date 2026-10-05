@@ -20,8 +20,11 @@ pub struct ServeOptions {
     pub ntfy: Option<String>,
     /// Include commands and messages in push notices, not only their kind.
     pub ntfy_details: bool,
-    /// Where the phone reaches the web app; tapped notices open it.
+    /// Where the phone reaches the web app; tapped notices and the pairing
+    /// QR code open it.
     pub public_url: Option<String>,
+    /// Skip the pairing QR code printed at startup.
+    pub no_qr: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +33,10 @@ pub enum Command {
     Hooks {
         url: String,
         decision_timeout: Duration,
+    },
+    /// Print the pairing QR code for the web app at `url`.
+    Qr {
+        url: String,
     },
     Help,
 }
@@ -49,10 +56,12 @@ pub fn usage() -> String {
         "herdr-companion: answer Claude Code prompts for Herdr agents from another device\n\n\
          USAGE:\n  \
          herdr-companion serve [--listen ADDR] [--decision-timeout SECS] [--herdr-socket PATH]\n  \
-                               [--ntfy URL [--ntfy-details]] [--public-url URL]\n  \
-         herdr-companion hooks [--url URL] [--decision-timeout SECS]\n\n\
+                               [--ntfy URL [--ntfy-details]] [--public-url URL] [--no-qr]\n  \
+         herdr-companion hooks [--url URL] [--decision-timeout SECS]\n  \
+         herdr-companion qr [--url URL]\n\n\
          `serve` reads its bearer token from {TOKEN_ENV} and listens on {DEFAULT_LISTEN} by default.\n\
-         It also serves the web app at /; open it on the phone and enter the token once.\n\
+         It also serves the web app at /. With --public-url it prints a QR code that opens the\n\
+         app on a phone already signed in; `qr` prints that code again.\n\
          `hooks` prints the Claude Code settings that point hooks at the companion.\n"
     )
 }
@@ -71,17 +80,20 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
     let mut ntfy = None;
     let mut ntfy_details = false;
     let mut public_url = None;
-    let serve = match command.to_str() {
-        Some("serve") => true,
-        Some("hooks") => false,
+    let mode = match command.to_str() {
+        Some("serve") => Mode::Serve,
+        Some("hooks") => Mode::Hooks,
+        Some("qr") => Mode::Qr,
         Some("help" | "-h" | "--help") => return Ok(Command::Help),
         _ => return Err(CliError::Unknown(command.to_string_lossy().into_owned())),
     };
+    let serve = mode == Mode::Serve;
+    let mut no_qr = false;
     while let Some(arg) = args.next() {
         let mut value = |name| args.next().ok_or(CliError::MissingValue(name));
         match arg.to_str() {
             Some("-h" | "--help") => return Ok(Command::Help),
-            Some("--decision-timeout") => {
+            Some("--decision-timeout") if mode != Mode::Qr => {
                 let secs = value("--decision-timeout")?
                     .to_str()
                     .and_then(|secs| secs.parse::<u64>().ok())
@@ -101,9 +113,11 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
             }
             Some("--ntfy") if serve => ntfy = Some(web_url(value("--ntfy")?, "--ntfy")?),
             Some("--ntfy-details") if serve => ntfy_details = true,
+            Some("--no-qr") if serve => no_qr = true,
             Some("--public-url") if serve => {
                 public_url = Some(web_url(value("--public-url")?, "--public-url")?)
             }
+            Some("--url") if mode == Mode::Qr => url = Some(web_url(value("--url")?, "--url")?),
             Some("--url") if !serve => {
                 url = Some(
                     value("--url")?
@@ -114,21 +128,31 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, C
             _ => return Err(CliError::Unknown(arg.to_string_lossy().into_owned())),
         }
     }
-    Ok(if serve {
-        Command::Serve(ServeOptions {
+    Ok(match mode {
+        Mode::Serve => Command::Serve(ServeOptions {
             listen,
             decision_timeout,
             herdr_socket,
             ntfy,
             ntfy_details,
             public_url,
-        })
-    } else {
-        Command::Hooks {
+            no_qr,
+        }),
+        Mode::Hooks => Command::Hooks {
             url: url.unwrap_or_else(|| format!("http://{DEFAULT_LISTEN}/hooks/claude")),
             decision_timeout,
-        }
+        },
+        Mode::Qr => Command::Qr {
+            url: url.unwrap_or_else(|| format!("http://{DEFAULT_LISTEN}")),
+        },
     })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Serve,
+    Hooks,
+    Qr,
 }
 
 fn web_url(value: OsString, name: &'static str) -> Result<String, CliError> {
@@ -217,6 +241,7 @@ mod tests {
                 ntfy: None,
                 ntfy_details: false,
                 public_url: None,
+                no_qr: false,
             })
         );
     }
@@ -244,6 +269,34 @@ mod tests {
         assert_eq!(
             parse(&["hooks", "--ntfy-details"]),
             Err(CliError::Unknown("--ntfy-details".into()))
+        );
+    }
+
+    #[test]
+    fn parses_pairing_options() {
+        let Command::Serve(options) = parse(&["serve", "--no-qr"]).unwrap() else {
+            panic!("serve");
+        };
+        assert!(options.no_qr);
+        assert_eq!(
+            parse(&["qr"]),
+            Ok(Command::Qr {
+                url: format!("http://{DEFAULT_LISTEN}")
+            })
+        );
+        assert_eq!(
+            parse(&["qr", "--url", "https://box.ts.net"]),
+            Ok(Command::Qr {
+                url: "https://box.ts.net".into()
+            })
+        );
+        assert_eq!(
+            parse(&["qr", "--decision-timeout", "5"]),
+            Err(CliError::Unknown("--decision-timeout".into()))
+        );
+        assert_eq!(
+            parse(&["hooks", "--no-qr"]),
+            Err(CliError::Unknown("--no-qr".into()))
         );
     }
 

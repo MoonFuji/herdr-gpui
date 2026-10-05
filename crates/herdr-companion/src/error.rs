@@ -59,4 +59,6 @@ pub enum Error {
     KeyNotAllowed(String),
     #[error("no transcript is known for that session")]
     NoTranscript,
+    #[error("the pairing link does not fit in a QR code: {0}")]
+    Qr(#[from] qrcode::types::QrError),
 }
