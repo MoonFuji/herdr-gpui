@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 use crate::{
-    browser::{Pick, Store, WebUrl},
+    browser::{Store, WebUrl},
     listening_ports::Link,
     sidebar::layout_tests::{fixture_window, full_draw, snapshot},
 };
@@ -120,7 +120,7 @@ fn a_new_browser_tab_opens_blank_in_the_group_that_asked(cx: &mut TestAppContext
         assert!(view.menu.page.is_none());
         view.group_pick(right)
     });
-    let Some(Pick::Page(id)) = picked else {
+    let Some(crate::browser::Pick::Page(id)) = picked else {
         panic!("the right group shows the new page, not {picked:?}")
     };
     let blank = cx.update(|_, cx| cx.global::<Store>().get(id).unwrap().location.is_none());
