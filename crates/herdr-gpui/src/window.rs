@@ -79,6 +79,10 @@ pub(crate) struct HerdrWindow {
     /// Unknown keys in the GUI config, ignored but reported; follows `config`.
     pub(crate) gui_config_diagnostic: crate::config_diagnostic::ConfigDiagnostic,
     pub(crate) theme: config::Theme,
+    /// The system appearance `theme` was loaded for, which is what Herdr is
+    /// told. It trails the system while the theme for a new appearance
+    /// loads, so Herdr never pairs the new appearance with the old colors.
+    pub(crate) theme_light: bool,
     pub(crate) config_load: Option<Task<()>>,
     pub(crate) settings: crate::settings_panel::SettingsPanel,
     pub(crate) integrations: crate::integrations::Integrations,
@@ -276,17 +280,13 @@ impl HerdrWindow {
     /// Theme and appearance changes all notify this view, so each one reaches
     /// the daemon without every place that sets a theme having to report it.
     pub(crate) fn observe_host_theme(cx: &mut Context<Self>) -> Subscription {
-        cx.observe_self(|this, cx| this.sync_host_theme(cx))
+        cx.observe_self(|this, _| this.sync_host_theme())
     }
 
     /// Tell every connection the terminal theme. Only queues, never waits:
     /// each handle skips a theme it already queued.
-    pub(crate) fn sync_host_theme(&self, cx: &App) {
-        let light = matches!(
-            cx.window_appearance(),
-            WindowAppearance::Light | WindowAppearance::VibrantLight
-        );
-        let theme = crate::connection::host_theme(&self.theme, light);
+    pub(crate) fn sync_host_theme(&self) {
+        let theme = crate::connection::host_theme(&self.theme, self.theme_light);
         for endpoint in &self.endpoints {
             endpoint.connection.sync_host_theme(&endpoint.live, &theme);
         }
@@ -399,7 +399,7 @@ impl HerdrWindow {
         self.reconcile_group_terminals(cx);
         // After polling: a connection that just got its first snapshot, or a
         // reconnect, is told the theme without waiting for it to change.
-        self.sync_host_theme(cx);
+        self.sync_host_theme();
         self.save_group_layouts(cx);
         self.poll_browser(window, cx);
         self.offer_browser_skill(window, cx);
@@ -676,6 +676,7 @@ impl HerdrWindow {
             },
             config,
             theme,
+            theme_light: crate::app::light_appearance(cx),
             config_load: None,
             settings: Default::default(),
             integrations: Default::default(),

@@ -433,6 +433,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
             ..Default::default()
         },
         theme: Default::default(),
+        theme_light: crate::app::light_appearance(cx),
         config_load: None,
         font_size_saves: Default::default(),
         config_watch: None,

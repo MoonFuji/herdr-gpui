@@ -237,6 +237,7 @@ impl HerdrWindow {
                             this.theme = theme;
                         }
                         this.apply_shared_theme(cx);
+                        this.theme_light = light;
                         if light != crate::app::light_appearance(cx) {
                             this.apply_system_theme(cx);
                         }
