@@ -586,7 +586,7 @@ pub const COMMANDS: &[CommandInfo] = &[
         command: Command::NewBrowserTab,
         name: "new_browser_tab",
         label: "New Browser Tab",
-        shortcuts: &[],
+        shortcuts: &["cmd-shift-b"],
     },
     CommandInfo {
         command: Command::InstallBrowserSkill,

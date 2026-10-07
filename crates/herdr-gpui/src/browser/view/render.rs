@@ -8,6 +8,7 @@ use crate::{
         Location, Store, Tab, TabId, WebUrl,
         groups::{GroupId, Pick, Slot},
     },
+    listening_ports::Link,
     window::Flash,
 };
 use gpui::{prelude::*, *};
@@ -367,12 +368,19 @@ impl HerdrWindow {
                 .flex()
                 .items_center()
                 .justify_center()
+                .flex_col()
+                .gap(px(10.))
                 .px_4()
                 .text_color(rgb(self.theme.muted))
                 .child(
                     div()
                         .debug_selector(move || slot.selector("browser-placeholder"))
                         .child(placeholder),
+                )
+                .children(
+                    (failure.is_none() && !loaded)
+                        .then(|| self.render_blank_ports(slot, id, cx))
+                        .flatten(),
                 )
                 .into_any_element(),
         };
@@ -402,6 +410,72 @@ impl HerdrWindow {
             .into_any_element()
     }
 
+    /// The workspace's listening ports under a blank tab's prompt, each
+    /// opening its page in this tab; None while it listens on none.
+    fn render_blank_ports(&self, slot: Slot, id: TabId, cx: &mut Context<Self>) -> Option<Div> {
+        let (_, _, listed) = self.focused_listening_ports()?;
+        let theme = &self.theme;
+        let chips = listed.ports.iter().filter_map(|port| {
+            let link = port.link(listed.origin)?;
+            let selector = slot.selector(&format!("blank-port-{}", port.number));
+            Some(
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .flex()
+                    .gap(px(6.))
+                    .px(px(10.))
+                    .py(px(2.))
+                    .rounded(px(crate::config::corners::CONTROL))
+                    .border_1()
+                    .border_color(rgb(theme.active))
+                    .cursor_pointer()
+                    .hover(|chip| chip.bg(rgb(theme.active)))
+                    .child(div().text_color(rgb(theme.foreground)).child(link.label()))
+                    .when(!port.process.is_empty(), |chip| {
+                        chip.child(port.process.clone())
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_blank_port(slot.id, id, &link, window, cx);
+                    })),
+            )
+        });
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .justify_center()
+                .gap(px(6.))
+                .children(chips),
+        )
+    }
+
+    /// A port picked on a blank tab loads in that tab. A port behind an SSH
+    /// tunnel opens as its status bar number does, once the tunnel is up.
+    fn open_blank_port(
+        &mut self,
+        group: GroupId,
+        id: TabId,
+        link: &Link,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match link {
+            Link::Page(url) => {
+                self.visit(group, id, Location::Web { url: url.clone() }, window, cx);
+            }
+            Link::Tunnel(_) => {
+                let Some((endpoint, workspace)) = self
+                    .focused_listening_ports()
+                    .map(|(endpoint, workspace, _)| (endpoint.to_owned(), workspace.to_owned()))
+                else {
+                    return;
+                };
+                self.open_port_link(&endpoint, &workspace, link, window, cx);
+            }
+        }
+    }
+
     fn submit_address(
         &mut self,
         group: GroupId,
@@ -414,7 +488,18 @@ impl HerdrWindow {
             self.show_flash(Flash::warning("Not an http or https address"), cx);
             return;
         };
-        let location = Location::Web { url };
+        self.visit(group, id, Location::Web { url }, window, cx);
+    }
+
+    /// Loads `location` in tab `id`, shown in `group`.
+    fn visit(
+        &mut self,
+        group: GroupId,
+        id: TabId,
+        location: Location,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         Store::update(cx, |store| store.visited(id, Some(location.clone()), None));
         #[cfg(any(target_os = "macos", windows))]
         if self.browser.pages.contains(id) {

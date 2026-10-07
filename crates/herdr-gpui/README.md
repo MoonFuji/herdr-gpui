@@ -1351,8 +1351,12 @@ the same tab. Splitting opens nothing new.
   or padded. Pressing that group brings the live tab there. A page shown in
   another group is stood in for with **Show Here**.
 - The group in use has the keyboard, and its chosen tab carries the accent.
-  **+** opens a Herdr tab in that group; New Browser Tab and Close Tab act
-  there too. Close Tab in an empty group closes the group.
+  **+** opens a menu of what to add to that group: **New Terminal Tab**
+  (`cmd-t`), **New Browser Tab** (`cmd-shift-b`), **Review Changes** when
+  the Git chip tracks a checkout, and the workspace's listening ports, each
+  opening its page. The shortcuts skip the menu and open in the group in
+  use, where Close Tab acts too. Close Tab in an empty group closes the
+  group.
 - Drag a divider to resize the groups beside it. Groups are the window's own,
   per workspace. A group's own connection closes with the group, or when the
   window leaves the workspace or host; returning reconnects it.
@@ -1375,7 +1379,7 @@ the same tab. Splitting opens nothing new.
   **Close Tab**, as in Herdr's own tab menu. A zoomed tab, where one pane
   fills the tab, shows a corner mark after its title, and the pane menu
   offers **Zoom** or **Unzoom** to match.
-- **…** also offers **New Browser Tab** and **Split Right**.
+- **…** also offers **Split Right**.
 - A split's new group opens from the right, sliding in at its own width
   while the group it came from gives up the room; a closed group folds away
   to the right as its neighbour takes the room back.
@@ -1393,8 +1397,11 @@ own page for each one. Tabs are saved in
 `$XDG_STATE_HOME/herdr/gpui/browser-tabs.json` (default `~/.local/state/`) and
 come back after a restart; closing a workspace in Herdr removes its tabs.
 
-- Open one with **New Browser Tab** in the command palette, from a clicked link
-  (see [Terminal Links](#terminal-links)), or from an agent (below).
+- Open one from a group's **+** menu, with **New Browser Tab** (`cmd-shift-b`)
+  in the command palette, from a clicked link
+  (see [Terminal Links](#terminal-links)), or from an agent (below). A new
+  tab starts blank with its address field focused, and lists the
+  workspace's listening ports: clicking one loads its page in that tab.
 - The toolbar has back, forward, reload, the address field, and a button that
   opens the page in the system browser. The address field accepts bare hosts:
   `localhost:3000` becomes `http://localhost:3000/`.
@@ -1456,8 +1463,9 @@ them to the agent that opened it, so it can change the page.
 
 ### Reviewing An Agent's Changes
 
-**Review changes...** in the title bar's Git popup opens a review tab on the
-focused local checkout's changes, with untracked text files as wholly added,
+**Review Changes** in a group's **+** menu, or **Review changes...** in the
+title bar's Git popup, opens a review tab on the focused local checkout's
+changes, with untracked text files as wholly added,
 and lets you send review notes to the agent that made them, like inline
 comments on a pull request.
 

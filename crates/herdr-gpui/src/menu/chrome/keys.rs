@@ -128,6 +128,10 @@ impl HerdrWindow {
             self.group_menu_key(event, window, cx);
             return;
         }
+        if self.menu.page == Some(Page::NewTab) {
+            self.new_tab_menu_key(event, window, cx);
+            return;
+        }
         if matches!(
             self.menu.page,
             Some(Page::Pane | Page::RenamePane | Page::PaneProcesses | Page::KillProcesses)

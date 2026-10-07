@@ -158,6 +158,21 @@ pub(crate) enum Link {
     Tunnel(Key),
 }
 
+impl Link {
+    /// Where it leads, as a menu names it: `localhost:5173`, or `:5173`
+    /// for a port reached through a tunnel opened on demand.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Page(url) => {
+                let url = url.as_str();
+                let url = url.split_once("://").map_or(url, |(_, rest)| rest);
+                url.trim_end_matches('/').to_owned()
+            }
+            Self::Tunnel(key) => format!(":{}", key.port),
+        }
+    }
+}
+
 /// Where a browser on this machine finds the scanned host.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Origin {

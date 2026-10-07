@@ -38,6 +38,8 @@ pub(crate) enum Page {
     RenameTab,
     /// A group's "…" menu: closing tabs and splitting.
     Group,
+    /// A group's "+" menu: the kinds of tab to open in it.
+    NewTab,
     Pane,
     RenamePane,
     /// The processes under the pane menu's pane.
