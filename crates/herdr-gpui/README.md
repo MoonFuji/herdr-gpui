@@ -1463,9 +1463,8 @@ them to the agent that opened it, so it can change the page.
 
 ### Reviewing An Agent's Changes
 
-**Review Changes** in a group's **+** menu, or **Review changes...** in the
-title bar's Git popup, opens a review tab on the focused local checkout's
-changes, with untracked text files as wholly added,
+**Review Changes** in a group's **+** menu opens a review tab on the focused
+local checkout's changes, with untracked text files as wholly added,
 and lets you send review notes to the agent that made them, like inline
 comments on a pull request.
 

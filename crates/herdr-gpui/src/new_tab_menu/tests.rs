@@ -155,6 +155,24 @@ fn review_is_offered_for_a_tracked_checkout(cx: &mut TestAppContext) {
         assert!(view.menu.page.is_none());
         assert_eq!(view.reviews.len(), 1);
     });
+    // A second review of the same checkout brings its tab back.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            let group = view.group_slots()[0].id;
+            view.open_new_tab_menu(group, Point::default(), window, cx);
+            view.activate_new_tab_row(Row::Review, window, cx)
+        })
+    });
+    let reviews = cx.update(|_, cx| {
+        cx.try_global::<Store>().map_or(0, |store| {
+            (0..64)
+                .filter_map(|id| store.get(crate::browser::TabId::test(id)))
+                .filter(|tab| matches!(tab.location, Some(crate::browser::Location::Review { .. })))
+                .count()
+        })
+    });
+    assert_eq!(reviews, 1);
+    view.read_with(cx, |view, _| assert_eq!(view.reviews.len(), 1));
 }
 
 #[gpui::test]

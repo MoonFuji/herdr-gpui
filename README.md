@@ -49,7 +49,7 @@ running another terminal emulator or wrapping the TUI.
     <td colspan="2">
       <img src="docs/screenshots/review.png" alt="Review tab showing a unified diff of uncommitted changes with syntax colouring, a changed-files list, and two numbered review notes ready to send to Claude">
       <br>
-      <sub><b><a href="crates/herdr-gpui/README.md#reviewing-an-agents-changes">Review an agent's changes</a>.</b> Open <b>Review changes…</b> from the title bar's Git menu, click any line to leave a note like a pull request comment, then <b>Send to agent</b>.</sub>
+      <sub><b><a href="crates/herdr-gpui/README.md#reviewing-an-agents-changes">Review an agent's changes</a>.</b> Open <b>Review Changes</b> from a tab strip's <b>+</b> menu, click any line to leave a note like a pull request comment, then <b>Send to agent</b>.</sub>
     </td>
   </tr>
   <tr>
