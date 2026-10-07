@@ -1,7 +1,6 @@
 //! Prepared preferences state and background-only configuration operations.
 use crate::{
     HerdrWindow,
-    config::ThemeName,
     fonts::StyledFont,
     herdr_settings::{Edit, IndicatorStyle, Settings, THEME_NAMES, ToastDelivery},
 };
@@ -153,10 +152,14 @@ impl HerdrWindow {
         }
     }
 
-    /// Shows the side of a `light:…,dark:…` theme for the system appearance.
+    /// Follows the system appearance: reads the theme again, for the other
+    /// side of a `light:…,dark:…` pair or for a theme file that a desktop
+    /// theme switcher rewrote before it changed the appearance. Herdr hears
+    /// of the new appearance only with the colors loaded for it.
     pub(crate) fn apply_system_theme(&mut self, cx: &mut Context<Self>) {
-        if ThemeName::follows_system(&self.config.theme) {
-            self.reload_theme(cx);
+        // Follow Herdr already shows the daemon's theme for it.
+        if self.config.theme == "Follow Herdr" || !self.reload_theme(cx) {
+            self.theme_light = crate::app::light_appearance(cx);
         }
     }
 
@@ -180,6 +183,12 @@ impl HerdrWindow {
         cx.spawn(async move |this, cx| {
             let result = load.await;
             let _ = this.update(cx, |this, cx| {
+                // Unless a load for a newer appearance is on its way, Herdr
+                // now hears this one, with whatever theme this load leaves.
+                if light == crate::app::light_appearance(cx) && this.theme_light != light {
+                    this.theme_light = light;
+                    cx.notify();
+                }
                 let (config, theme) = match result {
                     Ok(loaded) => loaded,
                     Err(error) => {

@@ -31,6 +31,7 @@ mod errors;
 mod framing;
 mod handshake;
 mod health;
+mod host_theme_order;
 mod host_themes;
 mod session_state;
 mod surface_encoding;
